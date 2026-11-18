@@ -1,0 +1,6 @@
+ai/
+docs/
+standards/
+dist/
+node_modules/
+coverage/
