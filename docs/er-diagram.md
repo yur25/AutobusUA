@@ -2,7 +2,13 @@
 
 Логічна модель даних AutobusUA. Документ деталізує модель, винесену за межі
 специфікації, щоб не збільшувати її обсяг. Типи наведені в термінах
-PostgreSQL/Prisma; остаточний синтаксис Prisma визначається під час реалізації.
+PostgreSQL; схема підтримується SQL-міграціями, а доступ виконується через
+`pg` і repository layer.
+
+Фізична схема зберігається в `database/migrations`: `USER` відображається на
+`app_user`, `SESSION` — на `user_session`; решта таблиць мають відповідні
+snake_case назви. Enum-подібні стани реалізовані як `text` із `CHECK`
+обмеженнями.
 
 ## Diagram
 
@@ -13,6 +19,7 @@ erDiagram
     USER ||--o{ TICKET : purchases
     USER ||--o{ SESSION : owns
     USER ||--o{ CARRIER_APPLICATION : reviews
+    USER ||--o{ IDEMPOTENCY_RECORD : creates
     TRIP ||--o{ TICKET : contains
 
     USER {
@@ -22,7 +29,6 @@ erDiagram
         string password_hash
         enum role
         datetime created_at
-        datetime updated_at
     }
 
     CARRIER_APPLICATION {
@@ -42,7 +48,6 @@ erDiagram
         uuid carrier_id FK
         string origin
         string destination
-        date departure_date
         datetime departure_at
         datetime arrival_at
         decimal price
@@ -62,11 +67,25 @@ erDiagram
     }
 
     SESSION {
-        string id PK
+        string id_hash PK
         uuid user_id FK
         datetime expires_at
         datetime created_at
-        datetime updated_at
+    }
+
+    IDEMPOTENCY_RECORD {
+        uuid id PK
+        uuid user_id FK
+        string operation
+        string key_hash
+        string request_hash
+        enum status "IN_PROGRESS|COMPLETED"
+        int response_status
+        json response_body
+        uuid resource_id "nullable"
+        datetime created_at
+        datetime completed_at "nullable"
+        datetime expires_at
     }
 ```
 
@@ -110,9 +129,10 @@ WHERE status = 'PENDING';
 
 ### `Ticket`
 
-Квиток пасажира на весь рейс. `price` є копією ціни на момент купівлі та не
-залежить від подальших змін у довідкових даних. `status` має значення `ACTIVE`
-або `CANCELLED`.
+Квиток користувача на весь рейс. І `PASSENGER`, і `CARRIER` можуть купувати
+квитки як пасажири. `price` є копією ціни на момент купівлі та не залежить від
+подальших змін у довідкових даних. `status` має значення `ACTIVE` або
+`CANCELLED`.
 
 Один користувач не може придбати більше одного активного квитка на той самий
 рейс. Це забезпечується partial unique index:
@@ -123,11 +143,53 @@ ON ticket (passenger_id, trip_id)
 WHERE status = 'ACTIVE';
 ```
 
+У назві поля `passenger_id` зберігається історична модель: воно посилається на
+будь-якого користувача, який купив квиток, включно з користувачем ролі
+`CARRIER`.
+
 ### `Session`
 
 Серверна сесія користувача. Ідентифікатор сесії зберігається в cookie, а стан
-сесії — у PostgreSQL. Прострочені сесії не повинні надавати доступ до захищених
-операцій.
+сесії — у PostgreSQL. Прострочені сесії не повинні надавати доступ до
+захищених операцій.
+
+### `IdempotencyRecord`
+
+Запис результату повторюваної state-changing операції. Для безпеки
+зберігаються хеші ключа та нормалізованого payload, а не обов'язково
+оригінальний ключ. `status` має значення `IN_PROGRESS` або `COMPLETED`.
+`operation` розрізняє тип операції, а унікальність визначається за
+`(user_id, operation, key_hash)`.
+
+Для покупки квитка запис і бізнес-зміни фіксуються в одній транзакції. Повтор
+із тим самим ключем і payload повертає збережений результат. Повтор із іншим
+payload отримує `409 Conflict`. Записи мають `expires_at` і можуть бути
+очищені після завершення строку дії. Завершені прострочені записи очищаються
+після запуску та кожні 60 секунд партіями до 1000 рядків; заблоковані рядки
+пропускаються. Повтор ключа блокує наявний запис до завершення транзакції.
+
+Рекомендований індекс ідемпотентності:
+
+```sql
+CREATE UNIQUE INDEX idempotency_record_operation_key
+ON idempotency_record (user_id, operation, key_hash);
+```
+
+## Retry and connection lifecycle
+
+Під час запуску DatabaseModule створює singleton connection pool, виконує
+`SELECT now()` і не дозволяє застосунку почати прийом HTTP-запитів, якщо
+перевірка неуспішна. Startup connection retry обмежений трьома спробами.
+Repositories отримують pool через DI. Для транзакцій вони беруть client через
+`pool.connect()`, використовують той самий client для всіх команд і викликають
+`release()` у кожному завершенні. Під час shutdown виконується `pool.end()`.
+
+Для PostgreSQL serialization failure (`40001`) і deadlock (`40P01`) повторюється
+вся транзакція максимум тричі з backoff `25 ms`, `50 ms`, `100 ms` і jitter.
+Такий retry дозволений лише для read-only або ідемпотентних операцій.
+Runtime connection failure після початку транзакції не повторюється, якщо
+результат `COMMIT` невідомий. Validation, authorization, not found,
+constraint, syntax і permission errors автоматично не повторюються.
 
 ## Key constraints and transactions
 
@@ -145,6 +207,11 @@ WHERE status = 'ACTIVE';
 5. **Видалення:** рейси та користувачі з пов'язаними квитками не видаляються
    каскадно. Для історії купівель потрібне контрольоване видалення або
    деактивація на рівні сервісу.
+6. **Незмінність рейсу:** після створення рейс не редагується і не видаляється
+   через API. Це зберігає історію квитків і спрощує інваріанти місткості.
+7. **Ролі квитка:** `PASSENGER` і `CARRIER` мають однакові права на власні
+   квитки: купівля, перегляд і скасування. Роль `CARRIER` додатково дозволяє
+   створювати власні рейси.
 
 ## Relationship summary
 
@@ -156,3 +223,51 @@ WHERE status = 'ACTIVE';
 | `Trip` → `Ticket` | 1:N | Кількість активних квитків не перевищує capacity |
 | `User` → `Session` | 1:N | Сесії мають строк дії |
 | `User` → `CarrierApplication` (reviewer) | 1:N | Reviewer має роль `ADMIN` |
+| `User` → `IdempotencyRecord` | 1:N | Ключ унікальний у межах операції |
+
+## API contract details
+
+### Authentication and roles
+
+Сесія передається через HttpOnly cookie `autobusua_session`. Реєстрація
+створює користувача з роллю `PASSENGER`. Підтвердження заявки атомарно змінює
+роль користувача на `CARRIER`. Авторизація перевіряється до виконання
+business service.
+
+### Main endpoints
+
+| Method | Path | Access | Purpose |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/register` | Public | Реєстрація |
+| `POST` | `/api/v1/auth/login` | Public | Створення сесії |
+| `POST` | `/api/v1/auth/logout` | Authenticated | Завершення сесії |
+| `GET` | `/api/v1/auth/me` | Authenticated | Поточний користувач |
+| `POST` | `/api/v1/carrier-applications` | Authenticated non-carrier | Подання заявки |
+| `GET` | `/api/v1/carrier-applications/me` | Authenticated | Власні заявки |
+| `GET` | `/api/v1/carrier-applications` | `ADMIN` | Список заявок |
+| `POST` | `/api/v1/carrier-applications/:id/approve` | `ADMIN` | Підтвердження |
+| `POST` | `/api/v1/carrier-applications/:id/reject` | `ADMIN` | Відхилення |
+| `GET` | `/api/v1/trips` | Public | Пошук рейсів |
+| `GET` | `/api/v1/trips/:id` | Public | Деталі рейсу |
+| `POST` | `/api/v1/trips` | `CARRIER` | Створення рейсу |
+| `GET` | `/api/v1/trips/mine` | `CARRIER` | Власні рейси |
+| `POST` | `/api/v1/trips/:tripId/tickets` | `PASSENGER`, `CARRIER` | Купівля |
+| `GET` | `/api/v1/tickets/me` | `PASSENGER`, `CARRIER` | Власні квитки |
+| `GET` | `/api/v1/tickets/:id` | Owner, `ADMIN` | Деталі квитка |
+| `POST` | `/api/v1/tickets/:id/cancel` | Owner | Скасування |
+
+Створення рейсу не має update/delete endpoint-ів. Для покупки, подання заявки,
+створення рейсу та інших state-changing операцій, де повтор може створити
+дубль, використовується `Idempotency-Key`. Для реєстрації він не потрібен:
+унікальний номер телефону захищений constraint-ом.
+
+### Pagination and query rules
+
+Списки використовують `page` (за замовчуванням `1`) і `pageSize` (за
+замовчуванням `20`, максимум `100`). Authorization та бізнес-фільтри
+застосовуються в `WHERE`, після чого виконується стабільне `ORDER BY` і
+`LIMIT/OFFSET`. Для рейсів пасажир бачить лише майбутні рейси з доступними
+місцями, перевізник — власні рейси, а адміністратор — дозволений
+адміністративний scope. Підрахунок та вибірка сторінки одного HTTP-запиту
+виконуються у спільному read-only `REPEATABLE READ` snapshot; окремі запити
+можуть бачити різний стан.
