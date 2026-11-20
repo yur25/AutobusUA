@@ -3,25 +3,22 @@ export interface PageQuery {
     pageSize?: number;
 }
 
-export function paginate<T>(
-    values: T[],
-    query: PageQuery,
-): {
+export interface Page<T> {
     items: T[];
     page: number;
     pageSize: number;
     totalItems: number;
     totalPages: number;
-} {
+}
+
+export function createPage<T>(items: T[], totalItems: number, query: PageQuery): Page<T> {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 20;
-    const start = (page - 1) * pageSize;
-
     return {
-        items: values.slice(start, start + pageSize),
+        items,
         page,
         pageSize,
-        totalItems: values.length,
-        totalPages: Math.ceil(values.length / pageSize),
+        totalItems,
+        totalPages: Math.ceil(totalItems / pageSize),
     };
 }

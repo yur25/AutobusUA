@@ -26,7 +26,7 @@ export class SessionAuthGuard implements CanActivate {
         private readonly requestContext: RequestContextService,
     ) {}
 
-    canActivate(context: ExecutionContext): boolean {
+    async canActivate(context: ExecutionContext): Promise<boolean> {
         const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, [
             context.getHandler(),
             context.getClass(),
@@ -35,7 +35,7 @@ export class SessionAuthGuard implements CanActivate {
             const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
             const rawId = getSessionCookie(request.headers.cookie);
             if (rawId) {
-                this.attachUser(request, rawId, true);
+                await this.attachUser(request, rawId, true);
             }
             return true;
         }
@@ -46,16 +46,20 @@ export class SessionAuthGuard implements CanActivate {
             throw new UnauthorizedException("Authentication required");
         }
 
-        this.attachUser(request, rawId, false);
+        await this.attachUser(request, rawId, false);
         return true;
     }
 
-    private attachUser(request: AuthenticatedRequest, rawId: string, optional: boolean): void {
+    private async attachUser(
+        request: AuthenticatedRequest,
+        rawId: string,
+        optional: boolean,
+    ): Promise<void> {
         const idHash = createHash("sha256").update(rawId).digest("hex");
-        const session = this.authRepository.findSession(idHash);
+        const session = await this.authRepository.findSession(idHash);
         if (!session || session.expiresAt <= Date.now()) {
             if (session) {
-                this.authRepository.deleteSession(idHash);
+                await this.authRepository.deleteSession(idHash);
             }
             if (!optional) {
                 throw new UnauthorizedException("Invalid or expired session");
@@ -63,9 +67,9 @@ export class SessionAuthGuard implements CanActivate {
             return;
         }
 
-        const user = this.authRepository.findUserById(session.userId);
+        const user = await this.authRepository.findUserById(session.userId);
         if (!user) {
-            this.authRepository.deleteSession(idHash);
+            await this.authRepository.deleteSession(idHash);
             if (!optional) {
                 throw new UnauthorizedException("Invalid or expired session");
             }

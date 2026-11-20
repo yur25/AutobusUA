@@ -5,6 +5,11 @@
 PostgreSQL; схема підтримується SQL-міграціями, а доступ виконується через
 `pg` і repository layer.
 
+Фізична схема зберігається в `database/migrations`: `USER` відображається на
+`app_user`, `SESSION` — на `user_session`; решта таблиць мають відповідні
+snake_case назви. Enum-подібні стани реалізовані як `text` із `CHECK`
+обмеженнями.
+
 ## Diagram
 
 ```mermaid
@@ -24,7 +29,6 @@ erDiagram
         string password_hash
         enum role
         datetime created_at
-        datetime updated_at
     }
 
     CARRIER_APPLICATION {
@@ -44,7 +48,6 @@ erDiagram
         uuid carrier_id FK
         string origin
         string destination
-        date departure_date
         datetime departure_at
         datetime arrival_at
         decimal price
@@ -64,11 +67,10 @@ erDiagram
     }
 
     SESSION {
-        string id PK
+        string id_hash PK
         uuid user_id FK
         datetime expires_at
         datetime created_at
-        datetime updated_at
     }
 
     IDEMPOTENCY_RECORD {
@@ -162,7 +164,9 @@ WHERE status = 'ACTIVE';
 Для покупки квитка запис і бізнес-зміни фіксуються в одній транзакції. Повтор
 із тим самим ключем і payload повертає збережений результат. Повтор із іншим
 payload отримує `409 Conflict`. Записи мають `expires_at` і можуть бути
-очищені після завершення строку дії.
+очищені після завершення строку дії. Завершені прострочені записи очищаються
+після запуску та кожні 60 секунд партіями до 1000 рядків; заблоковані рядки
+пропускаються. Повтор ключа блокує наявний запис до завершення транзакції.
 
 Рекомендований індекс ідемпотентності:
 
@@ -264,4 +268,6 @@ business service.
 застосовуються в `WHERE`, після чого виконується стабільне `ORDER BY` і
 `LIMIT/OFFSET`. Для рейсів пасажир бачить лише майбутні рейси з доступними
 місцями, перевізник — власні рейси, а адміністратор — дозволений
-адміністративний scope.
+адміністративний scope. Підрахунок та вибірка сторінки одного HTTP-запиту
+виконуються у спільному read-only `REPEATABLE READ` snapshot; окремі запити
+можуть бачити різний стан.

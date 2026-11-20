@@ -1,5 +1,6 @@
 import { BadRequestException } from "@nestjs/common";
 import { createHash } from "node:crypto";
+import type { SqlExecutor } from "./database.service.js";
 
 export const IDEMPOTENCY_STORE = Symbol("IDEMPOTENCY_STORE");
 
@@ -7,9 +8,9 @@ export interface IdempotencyStore {
     executeIdempotently<T>(
         userId: string,
         operation: string,
-        key: string,
+        keyHash: string,
         requestHash: string,
-        action: () => Promise<{ value: T; statusCode: number }>,
+        action: (executor: SqlExecutor) => Promise<{ value: T; statusCode: number }>,
     ): Promise<{ value: T; statusCode: number; replayed: boolean }>;
 }
 
@@ -39,11 +40,12 @@ export async function executeIdempotently<T>(
     operation: string,
     key: string | undefined,
     request: unknown,
-    action: () => Promise<{ value: T; statusCode: number }>,
+    action: (executor: SqlExecutor) => Promise<{ value: T; statusCode: number }>,
 ): Promise<{ value: T; statusCode: number; replayed: boolean }> {
     if (!key || key.length < 8 || key.length > 200) {
         throw new BadRequestException("A valid Idempotency-Key header is required");
     }
 
-    return store.executeIdempotently(userId, operation, key, requestHash(request), action);
+    const keyHash = createHash("sha256").update(key).digest("hex");
+    return store.executeIdempotently(userId, operation, keyHash, requestHash(request), action);
 }

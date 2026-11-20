@@ -80,7 +80,7 @@ export class AuthService {
         }
 
         const normalizedPhone = normalizePhone(phone);
-        const existing = this.authRepository.findUserByPhone(normalizedPhone);
+        const existing = await this.authRepository.findUserByPhone(normalizedPhone);
         if (existing) {
             if (existing.role !== "ADMIN") {
                 throw new Error("Bootstrap administrator phone belongs to a non-admin account");
@@ -98,7 +98,7 @@ export class AuthService {
             createdAt: new Date().toISOString(),
         });
         if (!created) {
-            const concurrentUser = this.authRepository.findUserByPhone(normalizedPhone);
+            const concurrentUser = await this.authRepository.findUserByPhone(normalizedPhone);
             if (concurrentUser?.role !== "ADMIN") {
                 throw new Error("Bootstrap administrator phone belongs to a non-admin account");
             }
@@ -140,7 +140,7 @@ export class AuthService {
             }
             throw error;
         }
-        const user = this.authRepository.findUserByPhone(phone);
+        const user = await this.authRepository.findUserByPhone(phone);
         const valid = user ? await argon2.verify(user.passwordHash, dto.password) : false;
         if (!user || !valid) {
             throw new UnauthorizedException("Invalid phone number or password");
@@ -148,7 +148,7 @@ export class AuthService {
 
         const rawSessionId = randomBytes(32).toString("base64url");
         const expiresAt = Date.now() + SESSION_TTL_MS;
-        this.authRepository.createSession({
+        await this.authRepository.createSession({
             idHash: hashSessionId(rawSessionId),
             userId: user.id,
             expiresAt,
@@ -161,8 +161,8 @@ export class AuthService {
         };
     }
 
-    logout(rawSessionId: string): void {
-        this.authRepository.deleteSession(hashSessionId(rawSessionId));
+    async logout(rawSessionId: string): Promise<void> {
+        await this.authRepository.deleteSession(hashSessionId(rawSessionId));
         this.logger.log("auth.user.logged_out");
     }
 

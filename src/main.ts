@@ -13,7 +13,14 @@ async function bootstrap(): Promise<void> {
         }),
     );
     app.enableShutdownHooks();
+    await app.init();
     await app.listen(process.env.PORT ?? 3000);
 }
 
-void bootstrap();
+void bootstrap().catch((error: unknown) => {
+    console.error(
+        "Application startup failed:",
+        error instanceof Error ? error.message : "Unknown error",
+    );
+    process.exitCode = 1;
+});

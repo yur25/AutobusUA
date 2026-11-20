@@ -1,16 +1,17 @@
 import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module.js";
-import { BOOKINGS_REPOSITORY, InMemoryBookingsRepository } from "./bookings.repository.js";
+import { BOOKINGS_REPOSITORY, PostgresBookingsRepository } from "./bookings.repository.js";
 import { BookingsController } from "./bookings.controller.js";
 import { BookingsService } from "./bookings.service.js";
+import { DatabaseModule } from "../../common/database.module.js";
 
 @Module({
-    imports: [AuthModule],
+    imports: [AuthModule, DatabaseModule],
     controllers: [BookingsController],
     providers: [
         BookingsService,
-        InMemoryBookingsRepository,
-        { provide: BOOKINGS_REPOSITORY, useExisting: InMemoryBookingsRepository },
+        PostgresBookingsRepository,
+        { provide: BOOKINGS_REPOSITORY, useExisting: PostgresBookingsRepository },
     ],
 })
 export class BookingsModule {}

@@ -39,13 +39,13 @@ export class AuthController {
 
     @Post("logout")
     @HttpCode(HttpStatus.NO_CONTENT)
-    logout(
+    async logout(
         @Headers("cookie") cookieHeader: string | undefined,
         @Res({ passthrough: true }) response: Response,
-    ): void {
+    ): Promise<void> {
         const sessionId = getSessionCookie(cookieHeader);
         if (sessionId) {
-            this.authService.logout(sessionId);
+            await this.authService.logout(sessionId);
         }
         response.setHeader("Set-Cookie", this.authService.clearCookie());
     }

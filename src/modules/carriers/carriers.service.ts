@@ -5,7 +5,6 @@ import {
     IDEMPOTENCY_STORE,
     type IdempotencyStore,
 } from "../../common/idempotency.js";
-import { paginate } from "../../common/pagination.js";
 import { StructuredLogger } from "../../common/structured-logger.js";
 import type { ApplicationStatus, CarrierApplication, User } from "../../common/domain.js";
 import { CARRIERS_REPOSITORY, type CarriersRepository } from "./carriers.repository.js";
@@ -29,7 +28,7 @@ export class CarriersService {
             "carrier-application.create",
             key,
             { fullName: user.fullName, phone: user.phone },
-            async () => {
+            async (executor) => {
                 const application: CarrierApplication = {
                     id: randomUUID(),
                     applicantId: user.id,
@@ -41,7 +40,7 @@ export class CarriersService {
                     createdAt: new Date().toISOString(),
                     reviewedAt: null,
                 };
-                const created = await this.repository.createApplication(application);
+                const created = await this.repository.createApplication(application, executor);
                 if (!created) {
                     throw new ConflictException("A pending carrier application already exists");
                 }
@@ -55,11 +54,11 @@ export class CarriersService {
     }
 
     listMine(user: User, query: CarrierApplicationQueryDto) {
-        return paginate(this.sort(this.repository.findApplicationsByApplicant(user.id)), query);
+        return this.repository.findApplicationsByApplicant(user.id, query);
     }
 
     listAll(query: CarrierApplicationQueryDto, status?: ApplicationStatus) {
-        return paginate(this.sort(this.repository.listApplications(status)), query);
+        return this.repository.listApplications(status, query);
     }
 
     async review(
@@ -69,7 +68,7 @@ export class CarriersService {
         key: string | undefined,
         reason?: string,
     ) {
-        const existing = this.repository.findApplication(id);
+        const existing = await this.repository.findApplication(id);
         if (!existing) {
             throw new NotFoundException("Carrier application not found");
         }
@@ -79,12 +78,13 @@ export class CarriersService {
             `carrier-application.${status.toLowerCase()}`,
             key,
             { id, reason: reason ?? null },
-            async () => {
+            async (executor) => {
                 const application = await this.repository.reviewApplication(
                     id,
                     admin.id,
                     status,
                     reason,
+                    executor,
                 );
                 if (!application) {
                     throw new ConflictException("Carrier application is no longer pending");
@@ -96,13 +96,6 @@ export class CarriersService {
                 });
                 return { value: application, statusCode: 200 };
             },
-        );
-    }
-
-    private sort(applications: CarrierApplication[]): CarrierApplication[] {
-        return applications.sort(
-            (left, right) =>
-                right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id),
         );
     }
 }

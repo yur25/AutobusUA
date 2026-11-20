@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install dev start build test smoke typecheck lint format format-check verify
+.PHONY: help install dev start build test smoke typecheck lint format format-check verify db-up db-down db-migrate
 
 help:
 	@echo Available targets:
@@ -15,6 +15,9 @@ help:
 	@echo   format        Format project files
 	@echo   format-check  Check project formatting
 	@echo   verify        Run the complete verification pipeline
+	@echo   db-up         Start the local PostgreSQL service
+	@echo   db-down       Stop local services without removing database data
+	@echo   db-migrate    Apply pending PostgreSQL migrations
 
 install:
 	npm ci
@@ -48,3 +51,12 @@ format-check:
 
 verify:
 	npm run verify
+
+db-up:
+	docker compose up -d postgres
+
+db-down:
+	docker compose down
+
+db-migrate:
+	npm run db:migrate

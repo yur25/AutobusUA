@@ -1,17 +1,10 @@
-import {
-    BadRequestException,
-    ConflictException,
-    Inject,
-    Injectable,
-    NotFoundException,
-} from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import {
     executeIdempotently,
     IDEMPOTENCY_STORE,
     type IdempotencyStore,
 } from "../../common/idempotency.js";
-import { paginate } from "../../common/pagination.js";
 import { StructuredLogger } from "../../common/structured-logger.js";
 import type { Trip, User } from "../../common/domain.js";
 import { TRIPS_REPOSITORY, type TripsRepository } from "./trips.repository.js";
@@ -41,6 +34,10 @@ export class TripsService {
 
         const origin = dto.origin.trim();
         const destination = dto.destination.trim();
+        const [integerPart, fractionPart = ""] = dto.price.split(".");
+        if (!integerPart) {
+            throw new BadRequestException("Trip price must be greater than zero");
+        }
         if (origin.length < 2 || destination.length < 2) {
             throw new BadRequestException("Trip origin and destination must not be empty");
         }
@@ -57,7 +54,7 @@ export class TripsService {
             "trip.create",
             key,
             dto,
-            async () => {
+            async (executor) => {
                 const trip: Trip = {
                     id: randomUUID(),
                     carrierId: carrier.id,
@@ -65,12 +62,12 @@ export class TripsService {
                     destination,
                     departureAt: departureAt.toISOString(),
                     arrivalAt: arrivalAt.toISOString(),
-                    price: dto.price,
+                    price: `${integerPart.replace(/^0+(?=\d)/, "")}.${fractionPart.padEnd(2, "0")}`,
                     capacity: dto.capacity,
                     occupiedSeats: 0,
                     createdAt: new Date().toISOString(),
                 };
-                this.repository.create(trip);
+                await this.repository.create(trip, executor);
                 this.logger.log("trip.created", {
                     tripId: trip.id,
                     carrierId: carrier.id,
@@ -87,45 +84,17 @@ export class TripsService {
             throw new BadRequestException("departureFrom must not be after departureTo");
         }
 
-        const trips = this.repository.list().filter((trip) => {
-            const isOwnTrip = user?.role === "CARRIER" && trip.carrierId === user.id;
-            const isAdmin = user?.role === "ADMIN";
-            if (!isOwnTrip && !isAdmin) {
-                if (
-                    Date.parse(trip.departureAt) <= Date.now() ||
-                    trip.occupiedSeats >= trip.capacity
-                ) {
-                    return false;
-                }
-            }
-            if (user?.role === "CARRIER" && !isOwnTrip) {
-                return false;
-            }
-            if (
-                query.origin &&
-                !trip.origin.toLocaleLowerCase().includes(query.origin.trim().toLocaleLowerCase())
-            ) {
-                return false;
-            }
-            if (
-                query.destination &&
-                !trip.destination
-                    .toLocaleLowerCase()
-                    .includes(query.destination.trim().toLocaleLowerCase())
-            ) {
-                return false;
-            }
-            const departure = Date.parse(trip.departureAt);
-            return (
-                (from === undefined || departure >= from) && (to === undefined || departure <= to)
-            );
-        });
-
-        return paginate(this.sort(trips), query);
+        const visibility =
+            user?.role === "ADMIN"
+                ? { kind: "ALL" as const }
+                : user?.role === "CARRIER"
+                  ? { kind: "CARRIER" as const, carrierId: user.id }
+                  : { kind: "AVAILABLE" as const };
+        return this.repository.search(query, visibility);
     }
 
-    findById(id: string, user?: User): Trip {
-        const trip = this.repository.findById(id);
+    async findById(id: string, user?: User): Promise<Trip> {
+        const trip = await this.repository.findById(id);
         if (!trip) {
             throw new NotFoundException("Trip not found");
         }
@@ -140,26 +109,6 @@ export class TripsService {
     }
 
     listMine(carrier: User, query: TripSearchQueryDto) {
-        const trips = this.repository.list().filter((trip) => trip.carrierId === carrier.id);
-        return paginate(this.sort(trips), query);
-    }
-
-    requireForPurchase(id: string): Trip {
-        const trip = this.repository.findById(id);
-        if (!trip) {
-            throw new NotFoundException("Trip not found");
-        }
-        if (Date.parse(trip.departureAt) <= Date.now()) {
-            throw new ConflictException("Tickets cannot be purchased after departure");
-        }
-        return trip;
-    }
-
-    private sort(trips: Trip[]): Trip[] {
-        return trips.sort(
-            (left, right) =>
-                left.departureAt.localeCompare(right.departureAt) ||
-                left.id.localeCompare(right.id),
-        );
+        return this.repository.listMine(carrier.id, query);
     }
 }

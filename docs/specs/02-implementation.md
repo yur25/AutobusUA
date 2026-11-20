@@ -6,8 +6,9 @@
 
 ### Current state
 
-Є ESM NestJS-каркас із модулями `Auth`, `Carriers`, `Trips`, `Bookings`;
-API та PostgreSQL не реалізовані.
+Є ESM NestJS API з модулями `Auth`, `Carriers`, `Trips`, `Bookings`.
+Поточне сховище — PostgreSQL через `pg`; попередня in-memory реалізація
+замінена без зміни зовнішнього HTTP API.
 
 ### Problem
 
