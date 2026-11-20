@@ -73,10 +73,25 @@ test("application health and version endpoints respond successfully", async (t) 
     assert.equal(response.body, '{"status":"ok"}');
 
     const versionResponse = await requestEndpoint("/version");
+    const readinessResponse = await requestEndpoint("/health/ready");
+    const tripsResponse = await requestEndpoint("/api/v1/trips");
     const expectedCommit =
         process.env.GIT_COMMIT?.trim() ??
         execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
     assert.equal(versionResponse.statusCode, 200);
     assert.deepEqual(JSON.parse(versionResponse.body), { commit: expectedCommit });
+    assert.equal(readinessResponse.statusCode, 200);
+    assert.deepEqual(JSON.parse(readinessResponse.body), {
+        status: "ok",
+        storage: "in-memory",
+    });
+    assert.equal(tripsResponse.statusCode, 200);
+    assert.deepEqual(JSON.parse(tripsResponse.body), {
+        items: [],
+        page: 1,
+        pageSize: 20,
+        totalItems: 0,
+        totalPages: 0,
+    });
 });

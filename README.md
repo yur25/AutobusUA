@@ -6,15 +6,16 @@ Backend-платформа для пошуку міжміських автобу
 ## Стек
 
 - Node.js, TypeScript, NestJS;
-- PostgreSQL та Prisma заплановані для наступного етапу;
+- in-memory storage для поточного прототипу; PostgreSQL через `pg` та
+  параметризований SQL заплановані для наступного етапу;
 - ESLint, Prettier, TypeScript strict mode;
 - Husky і lint-staged.
 
 ## Стан проєкту
 
-Зараз підготовлено інженерну основу: ESM NestJS-каркас, модулі-заглушки,
-quality tooling, git hooks, smoke test і документацію. Бізнес-логіка та робота
-з базою даних ще не реалізовані.
+HTTP API реалізовано на in-memory storage: автентифікація, заявки
+перевізників, рейси й квитки. Дані зберігаються лише в пам'яті процесу та
+втрачаються після перезапуску; PostgreSQL ще не підключена.
 
 ## Встановлення та запуск
 
@@ -24,6 +25,20 @@ quality tooling, git hooks, smoke test і документацію. Бізнес
 make install
 make dev
 ```
+
+Щоб переглядати та схвалювати заявки перевізників, задайте bootstrap admin
+змінні середовища до запуску. Обидві змінні обов'язкові разом; пароль має
+містити щонайменше 12 символів. Без них застосунок запускається без
+адміністраторського облікового запису.
+
+```bash
+BOOTSTRAP_ADMIN_PHONE=+380501234567 \
+BOOTSTRAP_ADMIN_PASSWORD='replace-with-a-secret-of-12-or-more-characters' \
+make dev
+```
+
+API починається з `/api/v1`; ключові маршрути наведені в
+[Spec 02](docs/specs/02-implementation.md) та [ER/API diagram](docs/er-diagram.md).
 
 Перевірка доступності застосунку:
 
@@ -57,5 +72,10 @@ make verify
 `make help` показує доступні команди, зокрема `test`, `smoke`, `typecheck`,
 `lint`, `format` і `format-check`.
 
-Деталі архітектури описані у [Spec 01](docs/specs/01-foundation.md), а
+Автоматизовані тести на цьому етапі обмежені smoke-перевірками запуску та
+базових endpoints. Повні unit, integration, end-to-end та mutation tests
+відкладені до наступної лабораторної.
+
+Деталі вимог описані у [Spec 01](docs/specs/01-foundation.md) і
+[Spec 02](docs/specs/02-implementation.md), а
 архітектурні рішення — у [ADR](docs/adr/README.md).

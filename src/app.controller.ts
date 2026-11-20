@@ -12,4 +12,12 @@ export class AppController {
     getVersion(): { commit: string } {
         return { commit: BUILD_COMMIT };
     }
+
+    @Get("health/ready")
+    getReadiness(): { status: string; storage: string } {
+        return {
+            status: "ok",
+            storage: "in-memory",
+        };
+    }
 }
