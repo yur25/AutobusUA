@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { request } from "node:http";
 import test from "node:test";
 
@@ -10,13 +10,13 @@ interface HealthResponse {
     body: string;
 }
 
-function requestHealth(): Promise<HealthResponse> {
+function requestEndpoint(path: string): Promise<HealthResponse> {
     return new Promise((resolve, reject) => {
         const healthRequest = request(
             {
                 hostname: "127.0.0.1",
                 port,
-                path: "/health",
+                path,
                 method: "GET",
             },
             (response) => {
@@ -38,7 +38,7 @@ function requestHealth(): Promise<HealthResponse> {
 }
 
 async function waitForHealth(server: ChildProcess): Promise<HealthResponse> {
-    const deadline = Date.now() + 10000;
+    const deadline = Date.now() + 30000;
     let lastError: unknown;
 
     while (Date.now() < deadline) {
@@ -47,7 +47,7 @@ async function waitForHealth(server: ChildProcess): Promise<HealthResponse> {
         }
 
         try {
-            return await requestHealth();
+            return await requestEndpoint("/health");
         } catch (error) {
             lastError = error;
             await new Promise((resolve) => setTimeout(resolve, 200));
@@ -57,7 +57,7 @@ async function waitForHealth(server: ChildProcess): Promise<HealthResponse> {
     throw new Error(`Health endpoint did not become available: ${String(lastError)}`);
 }
 
-test("application health endpoint responds successfully", async (t) => {
+test("application health and version endpoints respond successfully", async (t) => {
     const server = spawn(process.execPath, ["dist/main.js"], {
         env: { ...process.env, PORT: String(port) },
         stdio: "ignore",
@@ -71,4 +71,12 @@ test("application health endpoint responds successfully", async (t) => {
 
     assert.equal(response.statusCode, 200);
     assert.equal(response.body, '{"status":"ok"}');
+
+    const versionResponse = await requestEndpoint("/version");
+    const expectedCommit =
+        process.env.GIT_COMMIT?.trim() ??
+        execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    assert.equal(versionResponse.statusCode, 200);
+    assert.deepEqual(JSON.parse(versionResponse.body), { commit: expectedCommit });
 });

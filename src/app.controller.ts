@@ -1,9 +1,15 @@
 import { Controller, Get } from "@nestjs/common";
+import { BUILD_COMMIT } from "./generated/build-info.js";
 
-@Controller("health")
+@Controller()
 export class AppController {
-    @Get()
+    @Get("health")
     getHealth(): { status: string } {
         return { status: "ok" };
+    }
+
+    @Get("version")
+    getVersion(): { commit: string } {
+        return { commit: BUILD_COMMIT };
     }
 }

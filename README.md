@@ -18,11 +18,11 @@ quality tooling, git hooks, smoke test і документацію. Бізнес
 
 ## Встановлення та запуск
 
-Потрібні Node.js 24+ і npm.
+Потрібні Node.js 24+, npm і GNU Make.
 
 ```bash
-npm install
-npm run start:dev
+make install
+make dev
 ```
 
 Перевірка доступності застосунку:
@@ -31,18 +31,31 @@ npm run start:dev
 GET http://localhost:3000/health
 ```
 
+Версія збірки та Git commit SHA:
+
+```text
+GET http://localhost:3000/version
+```
+
+Для `make build` SHA коміту зчитується під час build і вбудовується в артефакт.
+У середовищі збірки поза Git-репозиторієм можна передати повний SHA через
+`GIT_COMMIT`.
+
 Production-збірка та запуск:
 
 ```bash
-npm run build
-npm start
+make build
+make start
 ```
 
 Повний локальний pipeline перевірок:
 
 ```bash
-npm run verify
+make verify
 ```
+
+`make help` показує доступні команди, зокрема `test`, `smoke`, `typecheck`,
+`lint`, `format` і `format-check`.
 
 Деталі архітектури описані у [Spec 01](docs/specs/01-foundation.md), а
 архітектурні рішення — у [ADR](docs/adr/README.md).

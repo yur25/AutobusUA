@@ -7,3 +7,4 @@ dist/
 
 coverage/
 npm-debug.log*
+/src/generated/build-info.ts

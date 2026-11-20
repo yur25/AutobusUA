@@ -12,6 +12,10 @@ tooling, smoke test і git hooks. Пункти про бізнес-логіку,
 - [ ] Запустити `npm run typecheck`; він перевіряє `src/` і `tests/`.
 - [ ] Для змін runtime перевірити `npm run smoke:test`.
 - [ ] Для повної локальної перевірки запустити `npm run verify`.
+- [ ] Основні команди також доступні через `make help`, наприклад
+  `make test`, `make build` і `make typecheck`.
+- [ ] Перевірити публічний `GET http://localhost:3000/version`; поле `commit`
+  має відповідати SHA коміту, вбудованому під час build.
 
 ## 2. Перед commit
 
