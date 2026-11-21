@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install dev start build test smoke typecheck lint format format-check verify db-up db-down db-migrate
+.PHONY: help install dev start build test coverage smoke mutation typecheck lint format format-check verify db-up db-down db-migrate
 
 help:
 	@echo Available targets:
@@ -8,8 +8,10 @@ help:
 	@echo   dev           Start the development server
 	@echo   start         Start the built application
 	@echo   build         Build the application with commit metadata
-	@echo   test          Run the current automated test suite
-	@echo   smoke         Run the HTTP smoke test
+	@echo   test          Start PostgreSQL, migrate, and run unit/integration/E2E tests
+	@echo   coverage      Check CarriersService logical branch coverage
+	@echo   smoke         Run E2E smoke tests against the test database
+	@echo   mutation      Run scoped Stryker mutation testing
 	@echo   typecheck     Type-check application and tests
 	@echo   lint          Run ESLint
 	@echo   format        Format project files
@@ -31,11 +33,23 @@ start:
 build:
 	npm run build
 
-test: build
+test:
+	docker compose up -d --wait postgres
+	npm run db:migrate:test
+	npm run test:unit
+	npm run test:integration
+	npm run test:e2e
+
+coverage:
+	npm run test:coverage:carriers
+
+smoke:
+	docker compose up -d --wait postgres
+	npm run db:migrate:test
 	npm run smoke:test
 
-smoke: build
-	npm run smoke:test
+mutation:
+	npm run mutation
 
 typecheck:
 	npm run typecheck

@@ -7,5 +7,7 @@ dist/
 !.env.test.example
 
 coverage/
+.stryker-tmp/
+reports/mutation/
 npm-debug.log*
 /src/generated/build-info.ts

@@ -20,7 +20,8 @@ HTTP API використовує PostgreSQL для автентифікації
 
 Потрібні Node.js 24+, npm, GNU Make і Docker з Docker Compose.
 
-Підготуйте локальну конфігурацію та окремі бази для застосунку й smoke-тестів:
+Підготуйте локальну конфігурацію для застосунку й тестового набору
+(unit, integration та E2E), використовуючи окрему тестову БД:
 
 ```powershell
 Copy-Item .env.example .env
@@ -54,11 +55,8 @@ Compose ізолює PostgreSQL від системних портів, публ
 застосунку, а не від поточної директорії; під час перенесення збірки потрібно
 зберегти каталог `database/migrations` поруч із каталогом `dist`.
 
-Прострочені завершені записи ідемпотентності очищаються після запуску та кожну
-хвилину партіями до 1000 записів. Заблоковані записи пропускаються; незакінчені
-та непрострочені записи не видаляються. Помилки очищення логуються, а наступна
-спроба виконується за розкладом. Список і його загальна кількість читаються в
-одному read-only snapshot PostgreSQL; різні HTTP-запити не ділять snapshot.
+Застарілі записи ідемпотентності періодично очищаються. Список таких записів і
+їх кількість читаються узгоджено в межах одного PostgreSQL-запиту.
 
 API починається з `/api/v1`; ключові маршрути наведені в
 [Spec 02](docs/specs/02-implementation.md) та [ER/API diagram](docs/er-diagram.md).
@@ -98,16 +96,33 @@ make start
 make verify
 ```
 
-`make help` показує доступні команди, зокрема `test`, `smoke`, `typecheck`,
-`lint`, `format` і `format-check`.
+`make help` показує доступні команди, зокрема `test`, `coverage`, `smoke`,
+`mutation`, `typecheck`, `lint`, `format` і `format-check`. `make coverage`
+перевіряє branch coverage `CarriersService`.
 
-Автоматизовані тести на цьому етапі обмежені smoke-перевірками запуску та
-базових endpoints. Повні unit, integration, end-to-end та mutation tests
-відкладені до наступної лабораторної.
+`make test` піднімає PostgreSQL через Docker Compose, чекає на її готовність,
+застосовує міграції до тестової БД та послідовно запускає unit, integration і
+E2E тести. Unit-тести розміщені біля класів у `src/`; integration та E2E —
+відповідно в `tests/integration/` та `tests/e2e/`. Integration/E2E працюють зі
+справжньою PostgreSQL. E2E запускають зібраний застосунок окремим процесом.
+`CarriersService` має 100% покриття логічних гілок; його unit-тести
+використовують вручну написані фейки залежностей без запуску БД чи інших
+реальних модулів.
 
-`make test` та `make verify` використовують лише dedicated `TEST_DATABASE_URL`
-із `.env.test`; вони відмовляються запускатися проти основної бази.
+`make test` залишає PostgreSQL запущеною та не видаляє тестову БД; тести
+прибирають лише створені ними записи. Для запуску потрібна виділена
+`TEST_DATABASE_URL` у `.env.test`, що вказує на `autobusua_test`; міграції та
+тести відмовляються працювати з іншою БД.
+
+`make mutation` запускає Stryker із Vitest runner лише для критичної
+бізнес-логіки, перевірюваної unit-тестами. Mutation score не має порога;
+mutants, що вижили, класифікуються в
+[звіті мутаційного аналізу](docs/audits/03-mutation-testing-report.md).
+Окремий аудит структури та критеріїв приймання Spec 03 завершено; він не
+входить до `make verify`; його результати наведені у
+[звіті аудиту тестування](docs/audits/03-testing-audit.md).
 
 Деталі вимог описані у [Spec 01](docs/specs/01-foundation.md) і
-[Spec 02](docs/specs/02-implementation.md), а
+[Spec 02](docs/specs/02-implementation.md) та
+[Spec 03](docs/specs/03-testing.md), а
 архітектурні рішення — у [ADR](docs/adr/README.md).

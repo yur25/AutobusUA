@@ -3,13 +3,18 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { request } from "node:http";
-import test from "node:test";
+import { afterEach, it } from "vitest";
 
 if (existsSync(".env.test")) {
     process.loadEnvFile(".env.test");
 }
 
 const port = 3100;
+const servers: ChildProcess[] = [];
+
+afterEach(async () => {
+    await Promise.all(servers.splice(0).map(stopServer));
+});
 
 interface HealthResponse {
     statusCode: number | undefined;
@@ -87,7 +92,7 @@ function getTestDatabaseUrl(): string {
     return testDatabaseUrl;
 }
 
-test("application health and version endpoints respond successfully", async (t) => {
+it("application health and version endpoints respond successfully", async () => {
     const testDatabaseUrl = getTestDatabaseUrl();
 
     const server = spawn(process.execPath, ["dist/main.js"], {
@@ -99,7 +104,7 @@ test("application health and version endpoints respond successfully", async (t) 
         stdio: "ignore",
     });
 
-    t.after(() => stopServer(server));
+    servers.push(server);
 
     const response = await waitForHealth(server);
 
@@ -135,7 +140,7 @@ test("application health and version endpoints respond successfully", async (t) 
     assert.equal(trips.totalPages, Math.ceil(trips.totalItems / trips.pageSize));
 });
 
-test("development entry point starts and validates requests", async (t) => {
+it("development entry point starts and validates requests", async () => {
     const testDatabaseUrl = getTestDatabaseUrl();
 
     const server = spawn(
@@ -155,7 +160,7 @@ test("development entry point starts and validates requests", async (t) => {
             stdio: "ignore",
         },
     );
-    t.after(() => stopServer(server));
+    servers.push(server);
 
     const response = await waitForHealth(server);
     assert.equal(response.statusCode, 200);
