@@ -54,7 +54,10 @@ class FakeCarriersRepository implements CarriersRepository {
         query: PageQuery,
     ): Promise<Page<CarrierApplication>> {
         this.applicantQueries.push({ userId, query });
-        return makePage(this.applications, query);
+        return makePage(
+            this.applications.filter((application) => application.applicantId === userId),
+            query,
+        );
     }
 
     async listApplications(
@@ -148,8 +151,14 @@ class FakeLogger extends StructuredLogger {
 function makePage(items: CarrierApplication[], query: PageQuery): Page<CarrierApplication> {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 20;
+    const sorted = [...items].sort(
+        (left, right) =>
+            Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+            left.id.localeCompare(right.id),
+    );
+    const offset = (page - 1) * pageSize;
     return {
-        items,
+        items: sorted.slice(offset, offset + pageSize),
         page,
         pageSize,
         totalItems: items.length,
@@ -283,6 +292,52 @@ describe("CarriersService", () => {
             { status: "PENDING", query },
             { status: undefined, query },
         ]);
+    });
+
+    it("lists only the applicant's applications before pagination", async () => {
+        const owner = createUser();
+        const other = createUser();
+        const first = {
+            ...createApplication(),
+            applicantId: owner.id,
+            createdAt: "2026-01-01T10:00:00.000Z",
+        };
+        const second = {
+            ...createApplication(),
+            applicantId: owner.id,
+            createdAt: "2026-01-01T11:00:00.000Z",
+        };
+        const foreign = {
+            ...createApplication(),
+            applicantId: other.id,
+            createdAt: "2026-01-01T12:00:00.000Z",
+        };
+        const repository = new FakeCarriersRepository(first);
+        repository.applications.push(foreign, second);
+        const { service } = setup(repository);
+
+        await expect(service.listMine(owner, { page: 1, pageSize: 1 })).resolves.toEqual({
+            items: [second],
+            page: 1,
+            pageSize: 1,
+            totalItems: 2,
+            totalPages: 2,
+        });
+        await expect(service.listMine(owner, { page: 2, pageSize: 1 })).resolves.toEqual({
+            items: [first],
+            page: 2,
+            pageSize: 1,
+            totalItems: 2,
+            totalPages: 2,
+        });
+        await expect(service.listMine(other, {})).resolves.toMatchObject({
+            items: [foreign],
+            totalItems: 1,
+        });
+        await expect(service.listMine(createUser(), {})).resolves.toMatchObject({
+            items: [],
+            totalItems: 0,
+        });
     });
 
     it("returns not found before attempting to review a missing application", async () => {

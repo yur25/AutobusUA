@@ -202,6 +202,64 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
         }
     });
 
+    it("returns only each applicant's own applications over HTTP", async () => {
+        const password = "E2E-strong-password-123";
+        const applicants: Array<{ id: string; cookie: string; applicationId: string }> = [];
+        for (const fullName of ["First Applicant", "Second Applicant"]) {
+            const phone = makePhone();
+            const registration = await requestApi("/api/v1/auth/register", {
+                method: "POST",
+                body: { fullName, phone, password },
+            });
+            expect(registration.status).toBe(201);
+            const id = requireString(requireRecord(registration.body, "registration"), "id");
+            createdUserIds.push(id);
+            const session = await login(phone, password);
+            const submission = await requestApi("/api/v1/carrier-applications", {
+                method: "POST",
+                cookie: session.cookie,
+                idempotencyKey: `e2e-applicant-isolation-${randomUUID()}`,
+            });
+            expect(submission.status).toBe(201);
+            applicants.push({
+                id,
+                cookie: session.cookie,
+                applicationId: requireString(requireRecord(submission.body, "application"), "id"),
+            });
+        }
+
+        for (const applicant of applicants) {
+            const response = await requestApi("/api/v1/carrier-applications/me?pageSize=10", {
+                cookie: applicant.cookie,
+            });
+            expect(response.status).toBe(200);
+            const page = requireRecord(response.body, "applicant application list");
+            expect(page).toMatchObject({ page: 1, pageSize: 10, totalItems: 1, totalPages: 1 });
+            if (!Array.isArray(page.items)) {
+                throw new Error("Expected applicant application list items to be an array");
+            }
+            expect(
+                page.items.map((item: unknown) => {
+                    const application = requireRecord(item, "application");
+                    return { id: application.id, applicantId: application.applicantId };
+                }),
+            ).toEqual([{ id: applicant.applicationId, applicantId: applicant.id }]);
+
+            const secondPage = await requestApi(
+                "/api/v1/carrier-applications/me?page=2&pageSize=1",
+                { cookie: applicant.cookie },
+            );
+            expect(secondPage.status).toBe(200);
+            expect(secondPage.body).toMatchObject({
+                items: [],
+                page: 2,
+                pageSize: 1,
+                totalItems: 1,
+                totalPages: 1,
+            });
+        }
+    });
+
     it("registers a passenger, promotes them to carrier, and completes a ticket lifecycle", async () => {
         const password = "E2E-strong-password-123";
         const phone = makePhone();

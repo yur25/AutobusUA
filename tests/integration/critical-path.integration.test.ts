@@ -468,6 +468,55 @@ describe("PostgreSQL booking transactions", () => {
         expect(currentTrip.rows[0]?.occupied_seats).toBe(0);
     });
 
+    it("isolates applicant application items and counts before pagination", async () => {
+        const firstApplicant = await insertUser("PASSENGER");
+        const secondApplicant = await insertUser("PASSENGER");
+        const admin = await insertUser("ADMIN");
+        const first = await carriersService.apply(firstApplicant, "applicant-list-first-0001");
+        await carriersService.review(
+            first.value.id,
+            admin,
+            "REJECTED",
+            "applicant-list-reject-0001",
+            "Incomplete documents",
+        );
+        const second = await carriersService.apply(firstApplicant, "applicant-list-second-0001");
+        const foreign = await carriersService.apply(secondApplicant, "applicant-list-other-0001");
+
+        const firstPage = await carriersRepository.findApplicationsByApplicant(firstApplicant.id, {
+            page: 1,
+            pageSize: 1,
+        });
+        const secondPage = await carriersRepository.findApplicationsByApplicant(firstApplicant.id, {
+            page: 2,
+            pageSize: 1,
+        });
+        const thirdPage = await carriersRepository.findApplicationsByApplicant(firstApplicant.id, {
+            page: 3,
+            pageSize: 1,
+        });
+        expect([...firstPage.items, ...secondPage.items].map((item) => item.id).sort()).toEqual(
+            [first.value.id, second.value.id].sort(),
+        );
+        expect(firstPage).toMatchObject({ page: 1, pageSize: 1, totalItems: 2, totalPages: 2 });
+        expect(secondPage).toMatchObject({ page: 2, pageSize: 1, totalItems: 2, totalPages: 2 });
+        expect(thirdPage).toMatchObject({
+            items: [],
+            page: 3,
+            pageSize: 1,
+            totalItems: 2,
+            totalPages: 2,
+        });
+
+        const otherPage = await carriersRepository.findApplicationsByApplicant(secondApplicant.id, {
+            pageSize: 10,
+        });
+        expect(otherPage.items.map((item) => item.id)).toEqual([foreign.value.id]);
+        expect(otherPage).toMatchObject({ totalItems: 1, totalPages: 1 });
+        const emptyPage = await carriersRepository.findApplicationsByApplicant(admin.id, {});
+        expect(emptyPage).toMatchObject({ items: [], totalItems: 0, totalPages: 0 });
+    });
+
     it("promotes a passenger and verifies their application in one transaction", async () => {
         const applicant = await insertUser("PASSENGER");
         const admin = await insertUser("ADMIN");
