@@ -376,6 +376,60 @@ describe("PostgreSQL booking transactions", () => {
         expect(currentTrip.rows[0]?.occupied_seats).toBe(0);
     });
 
+    it("filters ticket items and counts by status before pagination", async () => {
+        const { passengers, trip } = await createScenario();
+        const passenger = passengers[0];
+        if (!passenger) {
+            throw new Error("Test scenario did not create its passenger");
+        }
+
+        const cancelled = await bookingsService.purchase(
+            passenger,
+            trip.id,
+            "status-filter-purchase-0001",
+        );
+        await bookingsService.cancel(cancelled.value.id, passenger, "status-filter-cancel-0001");
+        const active = await bookingsService.purchase(
+            passenger,
+            trip.id,
+            "status-filter-purchase-0002",
+        );
+
+        for (const [status, expectedId] of [
+            ["ACTIVE", active.value.id],
+            ["CANCELLED", cancelled.value.id],
+        ] as const) {
+            const firstPage = await bookingsRepository.listTickets(passenger.id, {
+                status,
+                page: 1,
+                pageSize: 1,
+            });
+            const secondPage = await bookingsRepository.listTickets(passenger.id, {
+                status,
+                page: 2,
+                pageSize: 1,
+            });
+
+            expect(
+                firstPage.items.map((ticket) => ({ id: ticket.id, status: ticket.status })),
+            ).toEqual([{ id: expectedId, status }]);
+            expect(firstPage).toMatchObject({ page: 1, pageSize: 1, totalItems: 1, totalPages: 1 });
+            expect(secondPage).toMatchObject({
+                items: [],
+                page: 2,
+                pageSize: 1,
+                totalItems: 1,
+                totalPages: 1,
+            });
+        }
+
+        const unfiltered = await bookingsRepository.listTickets(passenger.id, { pageSize: 10 });
+        expect(unfiltered.items.map((ticket) => ticket.id).sort()).toEqual(
+            [active.value.id, cancelled.value.id].sort(),
+        );
+        expect(unfiltered.totalItems).toBe(2);
+    });
+
     it("rolls back the ticket and idempotency record if a later transaction step fails", async () => {
         const { passengers, trip } = await createScenario();
         const passenger = passengers[0];

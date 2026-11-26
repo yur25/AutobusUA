@@ -312,12 +312,42 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
         expect(cancellation.status).toBe(200);
         expect(cancellation.body).toMatchObject({ id: ticketId, status: "CANCELLED" });
 
-        const cancelledTickets = await requestApi("/api/v1/tickets/me?status=CANCELLED", {
+        const secondPurchase = await requestApi(`/api/v1/trips/${tripId}/tickets`, {
+            method: "POST",
             cookie: passengerSession.cookie,
+            idempotencyKey: `e2e-second-purchase-${randomUUID()}`,
         });
-        expect(cancelledTickets.status).toBe(200);
-        expect(requireRecord(cancelledTickets.body, "cancelled ticket list").items).toEqual(
-            expect.arrayContaining([expect.objectContaining({ id: ticketId })]),
+        expect(secondPurchase.status).toBe(201);
+        const activeTicketId = requireString(
+            requireRecord(secondPurchase.body, "second purchased ticket"),
+            "id",
         );
+
+        for (const [status, expectedId] of [
+            ["ACTIVE", activeTicketId],
+            ["CANCELLED", ticketId],
+        ] as const) {
+            const filtered = await requestApi(
+                `/api/v1/tickets/me?status=${status}&page=1&pageSize=10`,
+                { cookie: passengerSession.cookie },
+            );
+            expect(filtered.status).toBe(200);
+            const page = requireRecord(filtered.body, `${status} ticket list`);
+            expect(page).toMatchObject({
+                page: 1,
+                pageSize: 10,
+                totalItems: 1,
+                totalPages: 1,
+            });
+            if (!Array.isArray(page.items)) {
+                throw new Error(`Expected ${status} ticket list items to be an array`);
+            }
+            expect(
+                page.items.map((item: unknown) => {
+                    const ticket = requireRecord(item, "ticket");
+                    return { id: ticket.id, status: ticket.status };
+                }),
+            ).toEqual([{ id: expectedId, status }]);
+        }
     });
 });
