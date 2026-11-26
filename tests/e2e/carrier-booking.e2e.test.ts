@@ -282,7 +282,7 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
             departureAt,
             arrivalAt: new Date(Date.parse(departureAt) + 60 * 60 * 1000).toISOString(),
             price: "321.00",
-            capacity: 1,
+            capacity: 2,
         };
         const forbiddenTrip = await requestApi("/api/v1/trips", {
             method: "POST",
@@ -380,6 +380,82 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
             requireRecord(secondPurchase.body, "second purchased ticket"),
             "id",
         );
+
+        const otherPhone = makePhone();
+        const otherRegistration = await requestApi("/api/v1/auth/register", {
+            method: "POST",
+            body: { fullName: "Other Passenger", phone: otherPhone, password },
+        });
+        expect(otherRegistration.status).toBe(201);
+        const otherId = requireString(
+            requireRecord(otherRegistration.body, "other registration"),
+            "id",
+        );
+        createdUserIds.push(otherId);
+        const otherSession = await login(otherPhone, password);
+
+        const emptyTickets = await requestApi("/api/v1/tickets/me?status=ACTIVE", {
+            cookie: otherSession.cookie,
+        });
+        expect(emptyTickets.status).toBe(200);
+        const emptyPage = requireRecord(emptyTickets.body, "empty owner ticket list");
+        expect(emptyPage.totalItems).toBe(0);
+        expect(emptyPage.totalPages).toBe(0);
+        if (!Array.isArray(emptyPage.items)) {
+            throw new Error("Expected empty owner ticket list items to be an array");
+        }
+        expect(emptyPage.items.length).toBe(0);
+
+        const otherPurchase = await requestApi(`/api/v1/trips/${tripId}/tickets`, {
+            method: "POST",
+            cookie: otherSession.cookie,
+            idempotencyKey: `e2e-other-purchase-${randomUUID()}`,
+        });
+        expect(otherPurchase.status).toBe(201);
+        const otherTicketId = requireString(
+            requireRecord(otherPurchase.body, "other purchased ticket"),
+            "id",
+        );
+
+        for (const [session, ownerId, expectedId] of [
+            [passengerSession, passengerId, activeTicketId],
+            [otherSession, otherId, otherTicketId],
+        ] as const) {
+            const response = await requestApi("/api/v1/tickets/me?status=ACTIVE&pageSize=10", {
+                cookie: session.cookie,
+            });
+            expect(response.status).toBe(200);
+            const page = requireRecord(response.body, "owner ticket list");
+            expect(page).toMatchObject({ page: 1, pageSize: 10, totalItems: 1, totalPages: 1 });
+            if (!Array.isArray(page.items)) {
+                throw new Error("Expected owner ticket list items to be an array");
+            }
+            expect(
+                page.items.map((item: unknown) => {
+                    const ownedTicket = requireRecord(item, "ticket");
+                    return {
+                        id: ownedTicket.id,
+                        passengerId: ownedTicket.passengerId,
+                        status: ownedTicket.status,
+                    };
+                }),
+            ).toEqual([{ id: expectedId, passengerId: ownerId, status: "ACTIVE" }]);
+
+            const secondPage = await requestApi(
+                "/api/v1/tickets/me?status=ACTIVE&page=2&pageSize=1",
+                {
+                    cookie: session.cookie,
+                },
+            );
+            expect(secondPage.status).toBe(200);
+            expect(secondPage.body).toMatchObject({
+                items: [],
+                page: 2,
+                pageSize: 1,
+                totalItems: 1,
+                totalPages: 1,
+            });
+        }
 
         for (const [status, expectedId] of [
             ["ACTIVE", activeTicketId],

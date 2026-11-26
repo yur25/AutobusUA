@@ -430,6 +430,69 @@ describe("PostgreSQL booking transactions", () => {
         expect(unfiltered.totalItems).toBe(2);
     });
 
+    it("isolates ticket items and counts by passenger before pagination", async () => {
+        const { passengers, trip } = await createScenario(2);
+        const firstPassenger = passengers[0];
+        if (!firstPassenger) {
+            throw new Error("Test scenario did not create its passenger");
+        }
+        const secondPassenger = await insertUser("PASSENGER");
+        const emptyPassenger = await insertUser("PASSENGER");
+        const firstTicket = await bookingsService.purchase(
+            firstPassenger,
+            trip.id,
+            "ticket-owner-first-0001",
+        );
+        const secondTicket = await bookingsService.purchase(
+            secondPassenger,
+            trip.id,
+            "ticket-owner-second-0001",
+        );
+
+        for (const [passenger, ticket] of [
+            [firstPassenger, firstTicket.value],
+            [secondPassenger, secondTicket.value],
+        ] as const) {
+            for (const filter of [{ status: "ACTIVE" as const }, {}]) {
+                const firstPage = await bookingsRepository.listTickets(passenger.id, {
+                    ...filter,
+                    page: 1,
+                    pageSize: 10,
+                });
+                const secondPage = await bookingsRepository.listTickets(passenger.id, {
+                    ...filter,
+                    page: 2,
+                    pageSize: 1,
+                });
+                expect(
+                    firstPage.items.map((item) => ({
+                        id: item.id,
+                        passengerId: item.passengerId,
+                        status: item.status,
+                    })),
+                ).toEqual([{ id: ticket.id, passengerId: passenger.id, status: "ACTIVE" }]);
+                expect(firstPage).toMatchObject({
+                    page: 1,
+                    pageSize: 10,
+                    totalItems: 1,
+                    totalPages: 1,
+                });
+                expect(secondPage).toMatchObject({
+                    items: [],
+                    page: 2,
+                    pageSize: 1,
+                    totalItems: 1,
+                    totalPages: 1,
+                });
+            }
+        }
+
+        const emptyPage = await bookingsRepository.listTickets(emptyPassenger.id, {
+            status: "ACTIVE",
+        });
+        expect(emptyPage).toMatchObject({ items: [], totalItems: 0, totalPages: 0 });
+    });
+
     it("rolls back the ticket and idempotency record if a later transaction step fails", async () => {
         const { passengers, trip } = await createScenario();
         const passenger = passengers[0];
