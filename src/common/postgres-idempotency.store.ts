@@ -27,6 +27,13 @@ export class PostgresIdempotencyStore
     ) {}
 
     onApplicationBootstrap(): void {
+        const enabled = process.env.IDEMPOTENCY_CLEANUP_SCHEDULER_ENABLED;
+        if (enabled === "false") {
+            return;
+        }
+        if (enabled !== undefined && enabled !== "true") {
+            throw new Error("IDEMPOTENCY_CLEANUP_SCHEDULER_ENABLED must be true or false");
+        }
         this.scheduleCleanup(0);
     }
 
@@ -40,25 +47,29 @@ export class PostgresIdempotencyStore
 
     private scheduleCleanup(delayMs: number): void {
         this.cleanupTimer = setTimeout(() => {
-            this.cleanupTask = this.cleanupExpiredRecords();
+            this.cleanupTask = this.runScheduledCleanup();
         }, delayMs);
         this.cleanupTimer.unref();
     }
 
-    private async cleanupExpiredRecords(): Promise<void> {
+    async cleanupExpiredRecordsOnce(executor: SqlExecutor = this.database): Promise<void> {
+        const result = await executor.query(
+            "idempotency.cleanup_expired",
+            `DELETE FROM idempotency_record
+             WHERE id IN (
+                 SELECT id FROM idempotency_record
+                 WHERE status = 'COMPLETED' AND expires_at <= now()
+                 ORDER BY expires_at, id
+                 LIMIT 1000
+                 FOR UPDATE SKIP LOCKED
+             )`,
+        );
+        this.logger.log("idempotency.cleanup.completed", { deleted: result.rowCount });
+    }
+
+    private async runScheduledCleanup(): Promise<void> {
         try {
-            const result = await this.database.query(
-                "idempotency.cleanup_expired",
-                `DELETE FROM idempotency_record
-                 WHERE id IN (
-                     SELECT id FROM idempotency_record
-                     WHERE status = 'COMPLETED' AND expires_at <= now()
-                     ORDER BY expires_at, id
-                     LIMIT 1000
-                     FOR UPDATE SKIP LOCKED
-                 )`,
-            );
-            this.logger.log("idempotency.cleanup.completed", { deleted: result.rowCount });
+            await this.cleanupExpiredRecordsOnce();
         } catch (error) {
             this.logger.error("idempotency.cleanup.failed", undefined, {
                 errorCode: error instanceof Error ? error.name : "UnknownError",

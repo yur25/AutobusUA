@@ -1,21 +1,23 @@
 # Verification checklist
 
-Чеклист для поточного стану AutobusUA: ESM NestJS API з PostgreSQL,
-SQL-міграціями, Docker Compose та мінімальними smoke-тестами. Повні
-автоматизовані unit, integration, end-to-end і mutation tests не входять до
-обсягу лабораторної 2.
+Чеклист для AutobusUA: ESM NestJS API з PostgreSQL, SQL-міграціями, Docker
+Compose та окремими unit, integration, E2E і mutation tests.
 
 ## 1. Під час розробки
 
 - [ ] Після змін запустити `npm run format`.
 - [ ] Перевірити форматування без змін через `npm run format:check`.
 - [ ] Запустити `npm run lint`.
-- [ ] Запустити `npm run typecheck`; перевіряються застосунок і smoke-тести.
-- [ ] Для змін runtime виконати `npm run build` і `npm run smoke:test`.
+- [ ] Запустити `npm run typecheck`; перевіряються застосунок і тестові файли.
+- [ ] Для змін runtime виконати `npm run build` і релевантний тестовий набір.
+- [ ] Для повного набору виконати `make test`; він підіймає тестову PostgreSQL,
+  застосовує міграції та запускає unit, integration й E2E тести.
+- [ ] Для mutation testing виконати `make mutation` та класифікувати кожного
+  мутанта, що вижив.
 - [ ] Для повної локальної перевірки виконати `npm run verify`.
 - [ ] Перевірити доступні Makefile-команди через `make help`, зокрема
   `make dev`, `make start`, `make test`, `make build`, `make typecheck`,
-  `make db-up` і `make db-migrate`.
+  `make db-up`, `make db-migrate` і `make mutation`.
 - [ ] Перевірити, що `make dev` запускається з PostgreSQL і перезапускає
   застосунок після зміни джерела; SWC не замінює окремий typecheck.
 - [ ] Перевірити `GET /health`, `GET /health/ready` і `GET /version`;
@@ -26,7 +28,9 @@ SQL-міграціями, Docker Compose та мінімальними smoke-т�
 - [ ] Переконатися, що локальна PostgreSQL ізольована через Docker Compose та
   використовує non-default host port.
 - [ ] Переконатися, що `.env.test` вказує на окрему базу `autobusua_test`;
-  smoke-тест має відхиляти іншу назву тестової бази.
+  migration, integration та E2E тести мають відхиляти іншу назву БД.
+- [ ] Переконатися, що `make test` залишає Compose запущеним, не видаляє БД, а
+  тести прибирають лише створені ними записи.
 - [ ] Запустити `make db-up` і `make db-migrate`; повторне застосування
   міграцій не має повторно створювати вже застосовану схему.
 - [ ] Перевірити запуск міграцій з іншої робочої директорії зі збереженою
@@ -73,7 +77,7 @@ SQL-міграціями, Docker Compose та мінімальними smoke-т�
 
 - [ ] Переконатися, що commit створено після успішного pre-commit.
 - [ ] Виконати звичайний `git push`; Husky запускає `pre-push` з
-  `npm run verify`.
+  `npm run verify`, що також виконує `make test`.
 - [ ] Переконатися, що `verify` послідовно запускає format-check, lint,
   typecheck, build і smoke-тест та блокує push у разі помилки.
 
@@ -81,25 +85,32 @@ SQL-міграціями, Docker Compose та мінімальними smoke-т�
 
 - [ ] За потреби перевірити відтворення залежностей за lockfile командою
   `npm ci`.
-- [ ] Виконати `make db-up`, `make db-migrate` і `make verify` з налаштованими
-  `DATABASE_URL` та `TEST_DATABASE_URL`.
-- [ ] Перевірити smoke-покриття запуску, health/readiness, version і базового
-  HTTP endpoint; не розширювати автоматизоване тестування за межі узгодженого
-  scope.
+- [ ] Виконати `make test`, `make mutation` і `make verify` з налаштованою
+  dedicated `TEST_DATABASE_URL`.
+- [ ] Перевірити branch coverage `CarriersService` та звіт Stryker із
+  класифікацією surviving mutants.
 - [ ] Звірити фактичну структуру модулів, persistence, API та інфраструктури з
   `docs/specs/02-implementation.md` і пов'язаною ER-діаграмою.
-- [ ] Провести аудит N+1, поведінки при збоях PostgreSQL і трьох найбільш
-  суттєвих зрізаних кутів або крайових випадків; відокремити перевірені факти
-  від рекомендацій.
+- [ ] Фінальний аудит тестів проводити лише після окремої команди користувача;
+  в аудиті визначити топ-3 місця, де зелені тести можуть пропустити реальні
+  дефекти, і посилити тести для підтверджених прогалин.
 - [ ] Звірити завершеність роботи з `standards/definition-of-done.md`.
 - [ ] Перед завершенням переглянути `git diff`, виконати `git diff --check` і
   перевірити `git status --short`.
 
-## 6. Обмеження автоматизованих тестів
+## 6. Структура та обсяг автоматизованих тестів
 
-- У лабораторній 2 автоматизовані тести обмежені мінімальними smoke-тестами
-  запуску застосунку та базових endpoints.
-- Повні unit, integration, end-to-end і mutation tests бізнес-сценаріїв
-  залишаються поза scope цієї лабораторної та належать до наступного завдання.
-- Перевірки транзакцій, конкурентності та поведінки БД, яких не покриває
-  smoke-набір, виконуються вручну й фіксуються в результатах аудиту.
+- Unit-тести лежать поруч із класами у `.spec.ts`; справжній
+  `CarriersService` перевіряється з вручну написаними фейками залежностей, без
+  реальної БД чи інших реальних модулів.
+- Integration-тести лежать у `tests/integration/`, E2E-тести — у `tests/e2e/`;
+  обидва рівні використовують справжню dedicated PostgreSQL.
+- Вимоги до тестів, `make test`, `make mutation` та звіту Stryker наведені в
+  [Spec 03](../docs/specs/03-testing.md).
+
+## 7. Уточнення вимог із користувачем
+
+- [ ] Не пропонувати варіанти відповіді та не наводити аргументи за/проти
+  альтернатив у choice cards; якщо потрібне уточнення, ставити відкрите
+  запитання без заздалегідь заданого переліку варіантів, щоб користувач сам
+  сформулював рішення.

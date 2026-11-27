@@ -12,12 +12,21 @@
         "start:dev": "node scripts/write-build-info.mjs && node --enable-source-maps --import @swc-node/register/esm-register --watch scripts/start-dev.mjs",
         "start:prod": "node scripts/start-app.mjs",
         "db:migrate": "npm run build && node scripts/migrate.mjs",
+        "db:migrate:test": "npm run build && node scripts/migrate-test.mjs",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "lint": "eslint .",
         "typecheck": "node scripts/write-build-info.mjs && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-        "smoke:test": "tsx --test tests/smoke-test.ts",
-        "verify": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run smoke:test",
+        "test": "vitest run",
+        "test:unit": "vitest run src",
+        "test:integration": "vitest run tests/integration",
+        "test:e2e": "vitest run tests/e2e",
+        "test:coverage": "vitest run --coverage",
+        "test:coverage:carriers": "vitest run --coverage --coverage.include=src/modules/carriers/carriers.service.ts src/modules/carriers/carriers.service.spec.ts",
+        "test:watch": "vitest",
+        "smoke:test": "vitest run tests/e2e/smoke.test.ts",
+        "verify": "npm run format:check && npm run lint && npm run typecheck && make test",
+        "mutation": "stryker run",
         "prepare": "husky"
     },
     "repository": {
@@ -50,11 +59,14 @@
     "devDependencies": {
         "@eslint/js": "^10.0.1",
         "@nestjs/testing": "^12.5.1",
+        "@stryker-mutator/core": "^10.1.1",
+        "@stryker-mutator/vitest-runner": "^10.1.1",
         "@swc-node/register": "^1.12.1",
         "@swc/core": "^1.16.22",
         "@types/express": "^5.0.6",
         "@types/node": "^26.6.6",
         "@types/pg": "^8.23.1",
+        "@vitest/coverage-v8": "^5.1.1",
         "eslint": "^10.15.0",
         "eslint-config-prettier": "^10.1.8",
         "husky": "^9.1.7",
@@ -62,7 +74,8 @@
         "prettier": "^3.10.1",
         "tsx": "^4.23.15",
         "typescript": "^5.9.3",
-        "typescript-eslint": "^8.73.0"
+        "typescript-eslint": "^8.73.0",
+        "vitest": "^5.1.1"
     },
     "lint-staged": {
         "*.{ts,mjs}": [

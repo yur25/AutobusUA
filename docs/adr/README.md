@@ -16,3 +16,4 @@ ADR-NNN-коротка-назва.md
 - [ADR-002: PostgreSQL замість SQLite](ADR-002-postgresql-замість-sqlite.md)
 - [ADR-003: `pg` і параметризований SQL замість Prisma](ADR-003-pg-замість-prisma.md)
 - [ADR-004: Native `AsyncLocalStorage` для контексту запиту](ADR-004-native-async-local-storage.md)
+- [ADR-005: Vitest замість `node:test` для тестового набору](ADR-005-vitest-zamist-node-test.md)

@@ -14,7 +14,11 @@ async function bootstrap(): Promise<void> {
     );
     app.enableShutdownHooks();
     await app.init();
-    await app.listen(process.env.PORT ?? 3000);
+    const port = process.env.PORT ?? 3000;
+    await app.listen(port === "0" ? 0 : port);
+    if (port === "0" && process.send) {
+        process.send({ type: "listening", port: Number(new URL(await app.getUrl()).port) });
+    }
 }
 
 void bootstrap().catch((error: unknown) => {
