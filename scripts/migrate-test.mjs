@@ -19,4 +19,5 @@ if (decodeURIComponent(databaseUrl.pathname.slice(1)) !== "autobusua_test") {
 }
 
 process.env.DATABASE_URL = testDatabaseUrl;
+process.env.IDEMPOTENCY_CLEANUP_SCHEDULER_ENABLED = "false";
 await import("../dist/migrate.js");

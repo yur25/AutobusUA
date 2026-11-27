@@ -1,12 +1,11 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { once } from "node:events";
 import process from "node:process";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { stopServer, waitForServerPort } from "./server.js";
 
-const port = 3101;
-const baseUrl = `http://127.0.0.1:${port}`;
+let baseUrl: string;
 const createdUserIds: string[] = [];
 const createdTripIds: string[] = [];
 const bootstrapAdminCredentials = {
@@ -117,37 +116,6 @@ async function login(phone: string, password: string): Promise<{ id: string; coo
     };
 }
 
-async function waitForHealth(child: ChildProcess): Promise<void> {
-    const deadline = Date.now() + 30_000;
-    let lastError: unknown;
-
-    while (Date.now() < deadline) {
-        if (child.exitCode !== null) {
-            throw new Error(`Application exited with code ${child.exitCode}`);
-        }
-        try {
-            const response = await fetch(`${baseUrl}/health/ready`);
-            if (response.ok) {
-                return;
-            }
-            lastError = new Error(`Readiness returned HTTP ${response.status}`);
-        } catch (error) {
-            lastError = error;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-
-    throw new Error(`Application readiness timed out: ${String(lastError)}`);
-}
-
-async function stopServer(child: ChildProcess): Promise<void> {
-    if (child.exitCode === null && child.signalCode === null) {
-        const exited = once(child, "exit");
-        child.kill();
-        await exited;
-    }
-}
-
 async function cleanupCreatedRows(): Promise<void> {
     if (!pool) {
         return;
@@ -182,13 +150,15 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
             env: {
                 ...process.env,
                 DATABASE_URL: testDatabaseUrl,
-                PORT: String(port),
+                IDEMPOTENCY_CLEANUP_SCHEDULER_ENABLED: "false",
+                PORT: "0",
                 BOOTSTRAP_ADMIN_PHONE: bootstrapAdminCredentials.phone,
                 BOOTSTRAP_ADMIN_PASSWORD: bootstrapAdminCredentials.password,
             },
-            stdio: "ignore",
+            stdio: ["ignore", "ignore", "ignore", "ipc"],
         });
-        await waitForHealth(server);
+        baseUrl = `http://127.0.0.1:${await waitForServerPort(server)}`;
+        expect((await requestApi("/health/ready")).status).toBe(200);
     }, 40_000);
 
     afterAll(async () => {
@@ -258,7 +228,70 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
                 totalPages: 1,
             });
         }
-    });
+
+        const [first, second] = applicants;
+        if (!first || !second) throw new Error("Expected two applicants");
+        expect((await requestApi("/api/v1/carrier-applications?status=PENDING")).status).toBe(401);
+        expect(
+            (
+                await requestApi("/api/v1/carrier-applications?status=PENDING", {
+                    cookie: first.cookie,
+                })
+            ).status,
+        ).toBe(403);
+        const admin = await login(
+            bootstrapAdminCredentials.phone,
+            bootstrapAdminCredentials.password,
+        );
+        const rejection = await requestApi(
+            `/api/v1/carrier-applications/${first.applicationId}/reject`,
+            {
+                method: "POST",
+                cookie: admin.cookie,
+                idempotencyKey: `e2e-reject-${randomUUID()}`,
+                body: { reason: "Incomplete documents" },
+            },
+        );
+        expect(rejection.status).toBe(200);
+        for (const [status, included, excluded] of [
+            ["PENDING", second.applicationId, first.applicationId],
+            ["REJECTED", first.applicationId, second.applicationId],
+        ] as const) {
+            const ids: string[] = [];
+            let pageNumber = 1;
+            let totalItems: unknown;
+            while (true) {
+                const response = await requestApi(
+                    `/api/v1/carrier-applications?status=${status}&page=${pageNumber}&pageSize=100`,
+                    { cookie: admin.cookie },
+                );
+                expect(response.status).toBe(200);
+                const page = requireRecord(response.body, "administrator application list");
+                if (!Array.isArray(page.items)) throw new Error("Expected application items");
+                if (pageNumber === 1) totalItems = page.totalItems;
+                expect(page.totalItems).toBe(totalItems);
+                for (const item of page.items) {
+                    const application = requireRecord(item, "application");
+                    expect(application.status).toBe(status);
+                    ids.push(requireString(application, "id"));
+                }
+                if (page.items.length < 100) break;
+                pageNumber++;
+            }
+            expect(totalItems).toBe(ids.length);
+            expect(ids).toContain(included);
+            expect(ids).not.toContain(excluded);
+        }
+
+        expect(
+            (await requestApi("/api/v1/auth/logout", { method: "POST", cookie: first.cookie }))
+                .status,
+        ).toBe(204);
+        expect((await requestApi("/api/v1/auth/me", { cookie: first.cookie })).status).toBe(401);
+        const stillLoggedIn = await requestApi("/api/v1/auth/me", { cookie: second.cookie });
+        expect(stillLoggedIn.status).toBe(200);
+        expect(stillLoggedIn.body).toMatchObject({ id: second.id });
+    }, 30_000);
 
     it("registers a passenger, promotes them to carrier, and completes a ticket lifecycle", async () => {
         const password = "E2E-strong-password-123";
@@ -328,14 +361,30 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
         createdTripIds.push(tripId);
         expect(trip.carrierId).toBe(passengerId);
 
+        const otherOrigin = `Other ${randomUUID()}`;
+        const otherTripResponse = await requestApi("/api/v1/trips", {
+            method: "POST",
+            cookie: passengerSession.cookie,
+            idempotencyKey: `e2e-trip-other-${randomUUID()}`,
+            body: { ...tripPayload, origin: otherOrigin },
+        });
+        expect(otherTripResponse.status).toBe(201);
+        const otherTripId = requireString(
+            requireRecord(otherTripResponse.body, "other trip"),
+            "id",
+        );
+        createdTripIds.push(otherTripId);
+
         const search = await requestApi(
             `/api/v1/trips?origin=${encodeURIComponent(String(tripPayload.origin))}&destination=${encodeURIComponent(tripPayload.destination)}`,
         );
         expect(search.status).toBe(200);
         const searchBody = requireRecord(search.body, "trip search");
-        expect(searchBody.items).toEqual(
-            expect.arrayContaining([expect.objectContaining({ id: tripId })]),
-        );
+        if (!Array.isArray(searchBody.items)) throw new Error("Expected trip search items");
+        expect(searchBody.items.map((item: unknown) => requireRecord(item, "trip").id)).toEqual([
+            tripId,
+        ]);
+        expect(searchBody.totalItems).toBe(1);
 
         const purchaseKey = `e2e-purchase-${randomUUID()}`;
         const purchase = await requestApi(`/api/v1/trips/${tripId}/tickets`, {
@@ -394,6 +443,27 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
         createdUserIds.push(otherId);
         const otherSession = await login(otherPhone, password);
 
+        expect(
+            (await requestApi(`/api/v1/tickets/${activeTicketId}`, { cookie: otherSession.cookie }))
+                .status,
+        ).toBe(403);
+        expect(
+            (
+                await requestApi(`/api/v1/tickets/${activeTicketId}/cancel`, {
+                    method: "POST",
+                    cookie: otherSession.cookie,
+                    idempotencyKey: `e2e-foreign-cancel-${randomUUID()}`,
+                })
+            ).status,
+        ).toBe(403);
+        expect(
+            (
+                await requestApi(`/api/v1/tickets/${activeTicketId}`, {
+                    cookie: passengerSession.cookie,
+                })
+            ).body,
+        ).toMatchObject({ id: activeTicketId, status: "ACTIVE" });
+
         const emptyTickets = await requestApi("/api/v1/tickets/me?status=ACTIVE", {
             cookie: otherSession.cookie,
         });
@@ -416,6 +486,50 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
             requireRecord(otherPurchase.body, "other purchased ticket"),
             "id",
         );
+
+        const fullSearch = await requestApi(
+            `/api/v1/trips?origin=${encodeURIComponent(tripPayload.origin)}`,
+        );
+        expect(fullSearch.status).toBe(200);
+        expect(fullSearch.body).toMatchObject({ items: [], totalItems: 0 });
+        expect((await requestApi(`/api/v1/trips/${tripId}`)).status).toBe(404);
+        expect(
+            (await requestApi(`/api/v1/trips/${tripId}`, { cookie: passengerSession.cookie }))
+                .status,
+        ).toBe(200);
+        expect(
+            (await requestApi(`/api/v1/trips/${tripId}`, { cookie: adminSession.cookie })).status,
+        ).toBe(200);
+        for (const session of [passengerSession, adminSession]) {
+            const visible = await requestApi(
+                `/api/v1/trips?origin=${encodeURIComponent(tripPayload.origin)}`,
+                { cookie: session.cookie },
+            );
+            expect(visible.status).toBe(200);
+            const page = requireRecord(visible.body, "privileged trip search");
+            if (!Array.isArray(page.items)) throw new Error("Expected trip search items");
+            expect(page.items.map((item: unknown) => requireRecord(item, "trip").id)).toEqual([
+                tripId,
+            ]);
+            expect(page.totalItems).toBe(1);
+        }
+
+        if (!pool) throw new Error("Test database pool is unavailable");
+        await pool.query(
+            `UPDATE trip SET departure_at = now() - interval '2 hours',
+                             arrival_at = now() - interval '1 hour' WHERE id = $1`,
+            [otherTripId],
+        );
+        const departedSearch = await requestApi(
+            `/api/v1/trips?origin=${encodeURIComponent(otherOrigin)}`,
+        );
+        expect(departedSearch.status).toBe(200);
+        expect(departedSearch.body).toMatchObject({ items: [], totalItems: 0 });
+        expect((await requestApi(`/api/v1/trips/${otherTripId}`)).status).toBe(404);
+        expect(
+            (await requestApi(`/api/v1/trips/${otherTripId}`, { cookie: passengerSession.cookie }))
+                .status,
+        ).toBe(200);
 
         for (const [session, ownerId, expectedId] of [
             [passengerSession, passengerId, activeTicketId],
@@ -483,5 +597,5 @@ describe("carrier application and ticket lifecycle over HTTP", () => {
                 }),
             ).toEqual([{ id: expectedId, status }]);
         }
-    });
+    }, 30_000);
 });

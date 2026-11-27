@@ -169,6 +169,11 @@ describe("PostgreSQL booking transactions", () => {
         return Number(result.rows[0]?.count ?? 0);
     }
 
+    async function insertTrip(trip: Trip): Promise<void> {
+        await tripsRepository.create(trip, database);
+        tripIds.push(trip.id);
+    }
+
     it("serializes concurrent purchases of the last seat", async () => {
         const { passengers, trip } = await createScenario();
         const outcomes = await Promise.allSettled(
@@ -243,6 +248,87 @@ describe("PostgreSQL booking transactions", () => {
         ).rejects.toBeInstanceOf(ConflictException);
     });
 
+    it("isolates idempotency replay for the same key and payload across users", async () => {
+        const first = await insertUser("PASSENGER");
+        const second = await insertUser("PASSENGER");
+        const key = `shared-key-${randomUUID()}`;
+        const operation = "integration.user-isolation";
+        const execute = (user: User, currentOperation = operation, currentKey = key) =>
+            executeIdempotently(
+                idempotencyStore,
+                user.id,
+                currentOperation,
+                currentKey,
+                { same: true },
+                async () => ({
+                    value: { owner: user.id, operation: currentOperation, key: currentKey },
+                    statusCode: 201,
+                }),
+            );
+
+        expect(await execute(first)).toMatchObject({ replayed: false, value: { owner: first.id } });
+        expect(await execute(second)).toMatchObject({
+            replayed: false,
+            value: { owner: second.id },
+        });
+        expect(await execute(first)).toMatchObject({ replayed: true, value: { owner: first.id } });
+        expect(await execute(second)).toMatchObject({
+            replayed: true,
+            value: { owner: second.id },
+        });
+        const otherOperation = `${operation}.other`;
+        const otherKey = `other-key-${randomUUID()}`;
+        expect(await execute(first, otherOperation)).toMatchObject({ replayed: false });
+        expect(await execute(first, operation, otherKey)).toMatchObject({ replayed: false });
+        for (const [currentOperation, currentKey] of [
+            [operation, key],
+            [otherOperation, key],
+            [operation, otherKey],
+        ] as const) {
+            expect(await execute(first, currentOperation, currentKey)).toMatchObject({
+                replayed: true,
+                value: { owner: first.id, operation: currentOperation, key: currentKey },
+            });
+        }
+    });
+
+    it("does not delete another user's expired idempotency key", async () => {
+        const first = await insertUser("PASSENGER");
+        const second = await insertUser("PASSENGER");
+        const key = `shared-expired-${randomUUID()}`;
+        const operation = `integration.expired-isolation.${randomUUID()}`;
+        const expiredId = randomUUID();
+        await database.query(
+            "tests.insert_foreign_expired_idempotency",
+            `INSERT INTO idempotency_record
+                (id, user_id, operation, key_hash, request_hash, status,
+                 response_status, response_body, completed_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, 'COMPLETED', 200, '{}'::jsonb,
+                     now() - interval '2 days', now() - interval '1 day')`,
+            [
+                expiredId,
+                first.id,
+                operation,
+                createHash("sha256").update(key).digest("hex"),
+                "1".repeat(64),
+            ],
+        );
+        expect(
+            await executeIdempotently(
+                idempotencyStore,
+                second.id,
+                operation,
+                key,
+                {},
+                async () => ({
+                    value: { owner: second.id },
+                    statusCode: 201,
+                }),
+            ),
+        ).toMatchObject({ replayed: false, value: { owner: second.id } });
+        expect(await countRows("idempotency_record", "id = $1", [expiredId])).toBe(1);
+    });
+
     it("reuses an expired key only after deleting its expired record", async () => {
         const { passengers } = await createScenario();
         const passenger = passengers[0];
@@ -284,50 +370,65 @@ describe("PostgreSQL booking transactions", () => {
         ).toBe(1);
     });
 
-    it("cleans expired completed idempotency records but keeps in-progress records", async () => {
-        const { passengers } = await createScenario();
-        const passenger = passengers[0];
-        if (!passenger) {
-            throw new Error("Test scenario did not create its passenger");
-        }
+    it("cleans expired records in a rolled-back transaction", async () => {
         const expiredCompletedId = randomUUID();
         const expiredInProgressId = randomUUID();
-        await database.query(
-            "tests.insert_cleanup_idempotency_records",
-            `INSERT INTO idempotency_record
-                (id, user_id, operation, key_hash, request_hash, status,
-                 response_status, response_body, completed_at, expires_at)
-             VALUES
-                ($1, $2, 'integration.cleanup.completed', $3, $4, 'COMPLETED',
-                 200, '{}'::jsonb, now() - interval '2 days', now() - interval '1 day'),
-                ($5, $2, 'integration.cleanup.in_progress', $6, $4, 'IN_PROGRESS',
-                 NULL, NULL, NULL, now() - interval '1 day')`,
-            [
-                expiredCompletedId,
-                passenger.id,
-                createHash("sha256").update(expiredCompletedId).digest("hex"),
-                "2".repeat(64),
-                expiredInProgressId,
-                createHash("sha256").update(expiredInProgressId).digest("hex"),
-            ],
-        );
+        const unexpiredId = randomUUID();
         const cleanupStore = new PostgresIdempotencyStore(database, logger);
-        cleanupStore.onApplicationBootstrap();
+        const rollback = new Error("roll back cleanup verification");
+        await expect(
+            database.withTransaction("tests.cleanup_idempotency_rollback", async (executor) => {
+                await executor.query(
+                    "tests.create_isolated_cleanup_table",
+                    `CREATE TEMP TABLE idempotency_record
+                     (LIKE idempotency_record INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
+                     ON COMMIT DROP`,
+                );
+                const table = await executor.query<{ isolated: boolean }>(
+                    "tests.verify_isolated_cleanup_table",
+                    `SELECT to_regclass('idempotency_record') = to_regclass('pg_temp.idempotency_record') AS isolated`,
+                );
+                expect(table.rows[0]?.isolated).toBe(true);
+                await executor.query(
+                    "tests.insert_cleanup_idempotency_records",
+                    `INSERT INTO idempotency_record
+                        (id, user_id, operation, key_hash, request_hash, status,
+                         response_status, response_body, completed_at, expires_at)
+                     VALUES
+                        ($1, $2, 'integration.cleanup.completed', $3, $4, 'COMPLETED',
+                         200, '{}'::jsonb, now() - interval '2 days', now() - interval '1 day'),
+                        ($5, $2, 'integration.cleanup.in_progress', $6, $4, 'IN_PROGRESS',
+                         NULL, NULL, NULL, now() - interval '1 day'),
+                        ($7, $2, 'integration.cleanup.unexpired', $8, $4, 'COMPLETED',
+                         200, '{}'::jsonb, now(), now() + interval '1 day')`,
+                    [
+                        expiredCompletedId,
+                        randomUUID(),
+                        createHash("sha256").update(expiredCompletedId).digest("hex"),
+                        "2".repeat(64),
+                        expiredInProgressId,
+                        createHash("sha256").update(expiredInProgressId).digest("hex"),
+                        unexpiredId,
+                        createHash("sha256").update(unexpiredId).digest("hex"),
+                    ],
+                );
+                await cleanupStore.cleanupExpiredRecordsOnce(executor);
+                const remaining = await executor.query<{ id: string }>(
+                    "tests.check_cleanup_in_transaction",
+                    "SELECT id FROM idempotency_record ORDER BY id",
+                );
+                expect(remaining.rows.map((row) => row.id)).toEqual(
+                    [expiredInProgressId, unexpiredId].sort(),
+                );
+                throw rollback;
+            }),
+        ).rejects.toBe(rollback);
 
-        try {
-            const deadline = Date.now() + 2_000;
-            while (
-                (await countRows("idempotency_record", "id = $1", [expiredCompletedId])) > 0 &&
-                Date.now() < deadline
-            ) {
-                await new Promise((resolve) => setTimeout(resolve, 10));
-            }
-        } finally {
-            await cleanupStore.beforeApplicationShutdown();
-        }
-
-        expect(await countRows("idempotency_record", "id = $1", [expiredCompletedId])).toBe(0);
-        expect(await countRows("idempotency_record", "id = $1", [expiredInProgressId])).toBe(1);
+        expect(
+            await countRows("idempotency_record", "id = ANY($1::uuid[])", [
+                [expiredCompletedId, expiredInProgressId, unexpiredId],
+            ]),
+        ).toBe(0);
     });
 
     it("cancels once, restores capacity, and replays the original cancellation", async () => {
@@ -580,6 +681,49 @@ describe("PostgreSQL booking transactions", () => {
         expect(emptyPage).toMatchObject({ items: [], totalItems: 0, totalPages: 0 });
     });
 
+    it("filters administrator application items and counts by status before pagination", async () => {
+        const first = await insertUser("PASSENGER");
+        const second = await insertUser("PASSENGER");
+        const admin = await insertUser("ADMIN");
+        const rejected = await carriersService.apply(first, "admin-status-application-0001");
+        await carriersService.review(
+            rejected.value.id,
+            admin,
+            "REJECTED",
+            "admin-status-review-0001",
+        );
+        const pending = await carriersService.apply(second, "admin-status-application-0002");
+
+        for (const [status, included, excluded] of [
+            ["PENDING", pending.value.id, rejected.value.id],
+            ["REJECTED", rejected.value.id, pending.value.id],
+        ] as const) {
+            const expected = await database.query<{ id: string }>(
+                "tests.expected_application_status",
+                "SELECT id FROM carrier_application WHERE status = $1",
+                [status],
+            );
+            const expectedIds = expected.rows.map((row) => row.id).sort();
+            const ids: string[] = [];
+            let pageNumber = 1;
+            while (true) {
+                const page = await carriersRepository.listApplications(status, {
+                    page: pageNumber,
+                    pageSize: 100,
+                });
+                expect(page.totalItems).toBe(expectedIds.length);
+                expect(page.totalPages).toBe(Math.ceil(expectedIds.length / 100));
+                expect(page.items.every((item) => item.status === status)).toBe(true);
+                ids.push(...page.items.map((item) => item.id));
+                if (page.items.length < 100) break;
+                pageNumber++;
+            }
+            expect(ids.sort()).toEqual(expectedIds);
+            expect(ids).toContain(included);
+            expect(ids).not.toContain(excluded);
+        }
+    });
+
     it("promotes a passenger and verifies their application in one transaction", async () => {
         const applicant = await insertUser("PASSENGER");
         const admin = await insertUser("ADMIN");
@@ -778,5 +922,197 @@ describe("PostgreSQL booking transactions", () => {
             [trip.id, otherTrip.id].sort(),
         );
         expect(mine.items.map((item) => item.id)).toEqual([trip.id]);
+    });
+
+    it("filters trip visibility and owner counts before pagination", async () => {
+        const { carrier, passengers, trip } = await createScenario();
+        const passenger = passengers[0];
+        if (!passenger) throw new Error("Test scenario did not create its passenger");
+        await bookingsService.purchase(passenger, trip.id, "visibility-full-seat-0001");
+
+        const otherCarrier = await insertUser("CARRIER");
+        const future = new Date(Date.parse(trip.departureAt) + 60_000).toISOString();
+        const past = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+        const available = { ...trip, id: randomUUID(), departureAt: future };
+        const foreign = { ...available, id: randomUUID(), carrierId: otherCarrier.id };
+        const departed = {
+            ...trip,
+            id: randomUUID(),
+            departureAt: past,
+            arrivalAt: new Date(Date.parse(past) + 60 * 60 * 1000).toISOString(),
+        };
+        await insertTrip(available);
+        await insertTrip(foreign);
+        await insertTrip(departed);
+
+        const searchQuery = { origin: trip.origin, pageSize: 10 };
+        for (const [visibility, ids] of [
+            [{ kind: "AVAILABLE" as const }, [available.id, foreign.id]],
+            [
+                { kind: "CARRIER" as const, carrierId: carrier.id },
+                [trip.id, available.id, departed.id],
+            ],
+            [{ kind: "ALL" as const }, [trip.id, available.id, foreign.id, departed.id]],
+        ] as const) {
+            const result = await tripsRepository.search(searchQuery, visibility);
+            expect(result.items.map((item) => item.id).sort()).toEqual([...ids].sort());
+            expect(result.totalItems).toBe(ids.length);
+            const emptyPage = await tripsRepository.search(
+                { ...searchQuery, page: ids.length + 1, pageSize: 1 },
+                visibility,
+            );
+            expect(emptyPage).toMatchObject({
+                items: [],
+                totalItems: ids.length,
+                totalPages: ids.length,
+            });
+        }
+
+        const firstPage = await tripsRepository.listMine(carrier.id, { page: 1, pageSize: 2 });
+        const secondPage = await tripsRepository.listMine(carrier.id, { page: 2, pageSize: 2 });
+        expect([...firstPage.items, ...secondPage.items].map((item) => item.id).sort()).toEqual(
+            [trip.id, available.id, departed.id].sort(),
+        );
+        expect(firstPage).toMatchObject({ totalItems: 3, totalPages: 2 });
+        expect(secondPage).toMatchObject({ totalItems: 3, totalPages: 2 });
+        expect(
+            await tripsRepository.listMine(otherCarrier.id, { page: 2, pageSize: 1 }),
+        ).toMatchObject({
+            items: [],
+            totalItems: 1,
+            totalPages: 1,
+        });
+    });
+
+    it("applies route and inclusive departure filters before trip pagination", async () => {
+        const { trip } = await createScenario();
+        const marker = randomUUID();
+        const origin = `Origin ${marker}`;
+        const destination = `Destination ${marker}`;
+        const start = Date.now() + 24 * 60 * 60 * 1000;
+        const times = [-1, 0, 1, 2, 3].map((hours) =>
+            new Date(start + hours * 60 * 60 * 1000).toISOString(),
+        );
+        const matching: Trip[] = [];
+        for (const time of times) {
+            const candidate = {
+                ...trip,
+                id: randomUUID(),
+                origin,
+                destination,
+                departureAt: time,
+                arrivalAt: new Date(Date.parse(time) + 60 * 60 * 1000).toISOString(),
+            };
+            await insertTrip(candidate);
+            matching.push(candidate);
+        }
+        const firstMatching = matching[0];
+        const from = times[1];
+        const to = times[3];
+        if (!firstMatching || !from || !to) throw new Error("Expected route fixtures");
+        await insertTrip({ ...firstMatching, id: randomUUID(), origin: `Other ${marker}` });
+        await insertTrip({ ...firstMatching, id: randomUUID(), destination: `Other ${marker}` });
+
+        const route = {
+            origin: `  ${origin.toUpperCase()}  `,
+            destination: destination.toUpperCase(),
+        };
+        for (const [range, expected] of [
+            [{}, matching],
+            [{ departureFrom: from }, matching.slice(1)],
+            [{ departureTo: to }, matching.slice(0, 4)],
+            [{ departureFrom: from, departureTo: to }, matching.slice(1, 4)],
+        ] as const) {
+            const first = await tripsRepository.search(
+                { ...route, ...range, pageSize: 2 },
+                { kind: "ALL" },
+            );
+            const second = await tripsRepository.search(
+                { ...route, ...range, page: 2, pageSize: 2 },
+                { kind: "ALL" },
+            );
+            expect(first.items.map((item) => item.id)).toEqual(
+                expected.slice(0, 2).map((item) => item.id),
+            );
+            expect(second.items.map((item) => item.id)).toEqual(
+                expected.slice(2, 4).map((item) => item.id),
+            );
+            expect(first.totalItems).toBe(expected.length);
+            expect(second.totalItems).toBe(expected.length);
+            expect(first.totalPages).toBe(Math.ceil(expected.length / 2));
+        }
+    });
+
+    it("keeps user and session lookups and logout isolated", async () => {
+        const first = await insertUser("PASSENGER");
+        const second = await insertUser("CARRIER");
+        const sessions = [first, second].map((user) => ({
+            idHash: createHash("sha256").update(randomUUID()).digest("hex"),
+            userId: user.id,
+            expiresAt: Date.now() + 60_000,
+        }));
+        const [firstSession, secondSession] = sessions;
+        if (!firstSession || !secondSession) throw new Error("Expected two sessions");
+        await authRepository.createSession(firstSession);
+        await authRepository.createSession(secondSession);
+
+        for (const [user, session] of [
+            [first, firstSession],
+            [second, secondSession],
+        ] as const) {
+            expect((await authRepository.findUserByPhone(user.phone))?.id).toBe(user.id);
+            expect((await authRepository.findUserById(user.id))?.id).toBe(user.id);
+            expect(await authRepository.findSession(session.idHash)).toEqual(session);
+        }
+        expect(await authRepository.findUserById(randomUUID())).toBeUndefined();
+        expect(await authRepository.findUserByPhone(`missing-${randomUUID()}`)).toBeUndefined();
+        expect(
+            await authRepository.findSession(
+                createHash("sha256").update(randomUUID()).digest("hex"),
+            ),
+        ).toBeUndefined();
+        await authRepository.deleteSession(firstSession.idHash);
+        expect(await authRepository.findSession(firstSession.idHash)).toBeUndefined();
+        expect(await authRepository.findSession(secondSession.idHash)).toEqual(secondSession);
+    });
+
+    it("allows one passenger to hold active tickets for different trips", async () => {
+        const { passengers, trip } = await createScenario(2);
+        const passenger = passengers[0];
+        if (!passenger) throw new Error("Test scenario did not create its passenger");
+        const otherPassenger = await insertUser("PASSENGER");
+        const secondTrip = { ...trip, id: randomUUID() };
+        await insertTrip(secondTrip);
+        const first = await bookingsService.purchase(
+            passenger,
+            trip.id,
+            "different-trip-purchase-0001",
+        );
+        const other = await bookingsService.purchase(
+            otherPassenger,
+            trip.id,
+            "different-passenger-purchase-0001",
+        );
+        const second = await bookingsService.purchase(
+            passenger,
+            secondTrip.id,
+            "different-trip-purchase-0002",
+        );
+        expect(first.value.tripId).toBe(trip.id);
+        expect(second.value.tripId).toBe(secondTrip.id);
+        expect(second.value.id).not.toBe(first.value.id);
+        expect(
+            await bookingsRepository.findActiveTicket(passenger.id, trip.id, database),
+        ).toMatchObject({ id: first.value.id });
+        expect(
+            await bookingsRepository.findActiveTicket(passenger.id, secondTrip.id, database),
+        ).toMatchObject({ id: second.value.id });
+        await bookingsService.cancel(first.value.id, passenger, "different-trip-cancel-0001");
+        expect(
+            await bookingsRepository.findActiveTicket(passenger.id, trip.id, database),
+        ).toBeUndefined();
+        expect(
+            await bookingsRepository.findActiveTicket(otherPassenger.id, trip.id, database),
+        ).toMatchObject({ id: other.value.id });
     });
 });

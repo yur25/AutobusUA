@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { request } from "node:http";
 import { afterEach, it } from "vitest";
+import { stopServer, waitForServerPort } from "./server.js";
 
 if (existsSync(".env.test")) {
     process.loadEnvFile(".env.test");
 }
 
-const port = 3100;
 const servers: ChildProcess[] = [];
 
 afterEach(async () => {
@@ -21,7 +20,12 @@ interface HealthResponse {
     body: string;
 }
 
-function requestEndpoint(path: string, method = "GET", body?: string): Promise<HealthResponse> {
+function requestEndpoint(
+    port: number,
+    path: string,
+    method = "GET",
+    body?: string,
+): Promise<HealthResponse> {
     return new Promise((resolve, reject) => {
         const healthRequest = request(
             {
@@ -52,34 +56,6 @@ function requestEndpoint(path: string, method = "GET", body?: string): Promise<H
     });
 }
 
-async function waitForHealth(server: ChildProcess): Promise<HealthResponse> {
-    const deadline = Date.now() + 30000;
-    let lastError: unknown;
-
-    while (Date.now() < deadline) {
-        if (server.exitCode !== null) {
-            throw new Error(`Application exited with code ${server.exitCode}`);
-        }
-
-        try {
-            return await requestEndpoint("/health");
-        } catch (error) {
-            lastError = error;
-            await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-    }
-
-    throw new Error(`Health endpoint did not become available: ${String(lastError)}`);
-}
-
-async function stopServer(server: ChildProcess): Promise<void> {
-    if (server.exitCode === null && server.signalCode === null) {
-        const exited = once(server, "exit");
-        server.kill();
-        await exited;
-    }
-}
-
 function getTestDatabaseUrl(): string {
     const testDatabaseUrl = process.env.TEST_DATABASE_URL;
     assert.ok(testDatabaseUrl, "Set TEST_DATABASE_URL in .env.test to a dedicated test database");
@@ -99,21 +75,23 @@ it("application health and version endpoints respond successfully", async () => 
         env: {
             ...process.env,
             DATABASE_URL: testDatabaseUrl,
-            PORT: String(port),
+            IDEMPOTENCY_CLEANUP_SCHEDULER_ENABLED: "false",
+            PORT: "0",
         },
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
     });
 
     servers.push(server);
 
-    const response = await waitForHealth(server);
+    const port = await waitForServerPort(server);
+    const response = await requestEndpoint(port, "/health");
 
     assert.equal(response.statusCode, 200);
     assert.equal(response.body, '{"status":"ok"}');
 
-    const versionResponse = await requestEndpoint("/version");
-    const readinessResponse = await requestEndpoint("/health/ready");
-    const tripsResponse = await requestEndpoint("/api/v1/trips");
+    const versionResponse = await requestEndpoint(port, "/version");
+    const readinessResponse = await requestEndpoint(port, "/health/ready");
+    const tripsResponse = await requestEndpoint(port, "/api/v1/trips");
     const expectedCommit =
         process.env.GIT_COMMIT?.trim() ??
         execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -138,7 +116,7 @@ it("application health and version endpoints respond successfully", async () => 
     assert.equal(trips.pageSize, 20);
     assert.ok(trips.totalItems >= trips.items.length);
     assert.equal(trips.totalPages, Math.ceil(trips.totalItems / trips.pageSize));
-});
+}, 40_000);
 
 it("development entry point starts and validates requests", async () => {
     const testDatabaseUrl = getTestDatabaseUrl();
@@ -155,18 +133,20 @@ it("development entry point starts and validates requests", async () => {
             env: {
                 ...process.env,
                 DATABASE_URL: testDatabaseUrl,
-                PORT: String(port),
+                IDEMPOTENCY_CLEANUP_SCHEDULER_ENABLED: "false",
+                PORT: "0",
             },
-            stdio: "ignore",
+            stdio: ["ignore", "ignore", "ignore", "ipc"],
         },
     );
     servers.push(server);
 
-    const response = await waitForHealth(server);
+    const port = await waitForServerPort(server);
+    const response = await requestEndpoint(port, "/health");
     assert.equal(response.statusCode, 200);
     assert.equal(response.body, '{"status":"ok"}');
-    const readiness = await requestEndpoint("/health/ready");
+    const readiness = await requestEndpoint(port, "/health/ready");
     assert.equal(readiness.statusCode, 200);
-    const invalidRegistration = await requestEndpoint("/api/v1/auth/register", "POST", "{}");
+    const invalidRegistration = await requestEndpoint(port, "/api/v1/auth/register", "POST", "{}");
     assert.equal(invalidRegistration.statusCode, 400);
-});
+}, 40_000);
